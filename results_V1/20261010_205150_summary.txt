@@ -1,0 +1,18 @@
+ENGG3000 V1 (Week 5) performance results - 10 Oct 2026 20:51
+
+POSITION ACCURACY (correct square, % of frames)
+  mean 44.4%   worst 0.0%   squares >= 90%: 4/9
+  position jitter: mean 6.6 cm, worst 15.1 cm
+    near-left        0.0%   jitter 0.0/10.6 cm   mis-reads: far-centre:158;middle-centre:20
+    near-centre    100.0%   jitter 0.0/2.7 cm   mis-reads: -
+    near-right       0.0%   jitter 0.0/15.1 cm   mis-reads: near-centre:178
+    middle-left      0.0%   jitter 0.0/9.0 cm   mis-reads: middle-centre:138;far-centre:40
+    middle-centre  100.0%   jitter 0.0/1.9 cm   mis-reads: -
+    middle-right   100.0%   jitter 0.0/2.6 cm   mis-reads: -
+    far-left         0.0%   jitter 0.0/6.2 cm   mis-reads: far-centre:178
+    far-centre     100.0%   jitter 4.3/2.4 cm   mis-reads: -
+    far-right        0.0%   jitter 0.4/7.3 cm   mis-reads: far-centre:26;middle-centre:152
+
+SENSOR DATA (USB serial, free-running boards)
+  valid readings FRONT/LEFT/RIGHT: 100.0 / 100.0 / 100.0 %
+  (24099 position updates logged)
