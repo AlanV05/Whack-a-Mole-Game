@@ -1,0 +1,20 @@
+ENGG3000 V2 performance results - 06 Oct 2026 10:45
+
+POSITION ACCURACY (correct square, % of frames)
+  mean 90.2%   worst 51.4%   squares >= 90%: 6/9
+  position jitter: mean 8.7 cm, worst 23.3 cm
+    near-left      100.0%   jitter 0.0/6.0 cm   mis-reads: -
+    near-centre    100.0%   jitter 5.3/4.7 cm   mis-reads: -
+    near-right     100.0%   jitter 0.0/1.8 cm   mis-reads: -
+    middle-left     84.3%   jitter 17.1/16.1 cm   mis-reads: far-centre:26;far-left:2
+    middle-centre   76.5%   jitter 8.7/19.5 cm   mis-reads: far-left:8;far-centre:34
+    middle-right   100.0%   jitter 0.0/1.8 cm   mis-reads: -
+    far-left        51.4%   jitter 23.3/19.7 cm   mis-reads: far-centre:87
+    far-centre     100.0%   jitter 0.0/3.4 cm   mis-reads: -
+    far-right      100.0%   jitter 0.0/0.2 cm   mis-reads: -
+
+WIRELESS LINK (time-division polling)
+  update rate per sensor L/M/R: 10.1 / 10.1 / 2.0 Hz
+  reply success L/M/R: 96.3 / 97.0 / 26.7 %
+  WiFi round-trip L/M/R: 32 / 32 / 9 ms
+  (390 seconds logged)
