@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+.DS_Store
+results.zip
+sketch.properties
+venv/
+__pycache__/
