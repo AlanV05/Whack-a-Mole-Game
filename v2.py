@@ -29,6 +29,14 @@ Sprint 2 additions in this version:
 - Multiple mole types, reaction bonus, combo score multipliers
 - Level transition screens and prototype sensor calibration/status UI
 - Real audio remains future work
+
+Sensor integration (sensor_link.py):
+- Run with --sensors (or use play_with_sensors.py) to drive the game from
+  the three ESP32 ultrasonic boxes over Wi-Fi/UDP instead of the mouse.
+- Cursor = the hole zone the player is standing in; stepping into a zone and
+  holding still for a moment = one whack.
+- Dead zone (60 cm) warning + buzzer come from the real distances.
+- Press M at any time to switch to mouse fallback and back (demo backup).
 """
 
 import pygame
@@ -137,7 +145,7 @@ CURSOR_RADIUS = 10
 
 # Screen safety warning
 SAFETY_ZONE_HEIGHT = 105
-SAFETY_WARNING_DISTANCE_CM = 50
+SAFETY_WARNING_DISTANCE_CM = 60   # matches sensor_link.DEAD_ZONE_CM and the floor layout
 
 # Prototype input: one left-click counts as a whack.
 # Later this click event can be replaced with the ESP32/sensor hit event.
@@ -320,19 +328,23 @@ def lerp_color(c1, c2, t):
 
 
 # ---------------------------------------------------------------------------
-# Sensor input interface (stub)
+# Sensor input interface
 # ---------------------------------------------------------------------------
-def get_player_position(mouse_pos):
+def get_player_position(mouse_pos, sensor_link=None):
     """
     Returns the player's tracked (x, y) position on screen.
 
-    Currently a placeholder driven by the mouse. Once the ESP32 sensor
-    boxes are streaming data (serial/UDP), replace this function's body
-    with a read from that connection and map it into screen coordinates.
-    Keeping this as a single function means the rest of the game code
-    doesn't need to change when real sensor input is wired in.
+    Mouse mode (sensor_link is None): the mouse position, as before.
+    Sensor mode: the centre of the hole the player is standing in, or None
+    if nobody is in the play area.  HOLE_POSITIONS is read every call, so
+    this follows a landscape/portrait switch automatically.
     """
-    return mouse_pos
+    if sensor_link is None:
+        return mouse_pos
+    index = sensor_link.hole_index()
+    if index is None:
+        return None
+    return HOLE_POSITIONS[index]
 
 
 def sensors_ready(sensor_status):
@@ -955,6 +967,8 @@ def draw_holes(surface):
 
 
 def draw_cursor(surface, pos, hit_flash):
+    if pos is None:
+        return  # sensor mode with nobody in the play area
     radius = CURSOR_RADIUS + (6 if hit_flash else 0)
     draw_glow(surface, pos, radius + 10, COLOR_CURSOR, steps=3, max_alpha=60)
     pygame.draw.circle(surface, COLOR_CURSOR, pos, radius)
@@ -984,15 +998,14 @@ def draw_hammer_hit(surface, pos, t):
     surface.blit(hammer_surf, (pos[0] - 40, pos[1] - 40))
 
 
-def player_is_too_close_to_screen(player_pos):
+def player_is_too_close_to_screen(player_pos, sensor_link=None):
     """
-    Mouse y position temporarily represents distance from the screen.
-
-    The top part of the game window is treated as the area within 50 cm
-    of the screen. During sensor integration, replace this calculation
-    with the real distance received from the ultrasonic sensor.
+    Sensor mode: True if any ultrasonic sensor reads closer than the 60 cm
+    dead zone.  Mouse mode: the top strip of the window stands in for it.
     """
-    return player_pos[1] <= SAFETY_ZONE_HEIGHT
+    if sensor_link is not None:
+        return sensor_link.too_close()
+    return player_pos is not None and player_pos[1] <= SAFETY_ZONE_HEIGHT
 
 
 def draw_safety_zone(surface, small_font):
@@ -1001,7 +1014,7 @@ def draw_safety_zone(surface, small_font):
     pygame.draw.line(surface, (200, 130, 60), (0, SAFETY_ZONE_HEIGHT), (SCREEN_WIDTH, SAFETY_ZONE_HEIGHT), 2)
 
     label = small_font.render(
-        "Screen safety zone   keep at least 50 cm away",
+        f"Screen safety zone   keep at least {SAFETY_WARNING_DISTANCE_CM} cm away",
         True,
         COLOR_TEXT
     )
@@ -1171,7 +1184,7 @@ def draw_title_screen(surface, now, font_title, font_small):
     surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, hint_y)))
 
 
-def draw_sensor_calibration(surface, now, font_big, font_small, sensor_status):
+def draw_sensor_calibration(surface, now, font_big, font_small, sensor_status, sensor_link=None):
     """Prototype calibration/status screen for the three ESP32 sensors."""
     draw_background(surface, now)
     overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
@@ -1195,6 +1208,9 @@ def draw_sensor_calibration(surface, now, font_big, font_small, sensor_status):
         color = COLOR_SENSOR_OK if online else COLOR_SENSOR_BAD
         pygame.draw.circle(surface, color, (panel.x + 115, y), 12)
         status_word = "CONNECTED" if online else "NOT CONNECTED"
+        if sensor_link is not None and online:
+            distance = sensor_link.distance_cm(sensor_id)
+            status_word += f"   {distance:.0f} cm" if distance is not None else "   no echo"
         text = font_small.render(f"Sensor {sensor_id}: {status_word}", True, COLOR_TEXT)
         surface.blit(text, (panel.x + 145, y - text.get_height() // 2))
 
@@ -1208,9 +1224,11 @@ def draw_sensor_calibration(surface, now, font_big, font_small, sensor_status):
     msg = font_small.render(message, True, color)
     surface.blit(msg, msg.get_rect(center=(panel.centerx, panel.bottom - 70)))
 
-    test_note = pygame.font.SysFont("arial", 14).render(
-        "Prototype test: keys 1 / 2 / 3 toggle sensor status", True, COLOR_TEXT_SOFT
-    )
+    if sensor_link is not None:
+        note_text = "Live ESP32 data on UDP   |   M: use mouse instead"
+    else:
+        note_text = "Mouse mode: keys 1 / 2 / 3 toggle sensor status   |   M: use sensors"
+    test_note = pygame.font.SysFont("arial", 14).render(note_text, True, COLOR_TEXT_SOFT)
     surface.blit(test_note, test_note.get_rect(center=(panel.centerx, panel.bottom - 35)))
 
 
@@ -1311,6 +1329,15 @@ def parse_command_line(argv):
     return orientation, fullscreen
 
 
+def parse_input_mode(args):
+    """--sensors turns on the ESP32 input, --mouse forces the mouse.  None = not given."""
+    if "--sensors" in args:
+        return True
+    if "--mouse" in args:
+        return False
+    return None
+
+
 class Display:
     """
     Owns the real window.  The game always draws to `canvas`, which is
@@ -1409,10 +1436,46 @@ STAGE_PLAYING = "playing"
 STAGE_GAME_OVER = "game_over"
 
 
-def run_game(orientation=None, fullscreen=None):
+def open_sensor_link():
+    """Start listening for the ESP32s.  Returns None (mouse mode) if that fails."""
+    try:
+        import sensor_link
+        link = sensor_link.SensorLink()
+    except OSError as exc:
+        print(f"[sensors] {exc}\n[sensors] Falling back to mouse input.")
+        return None
+    print(f"[sensors] Listening for ESP32 data on UDP port {sensor_link.LISTEN_PORT}")
+    return link
+
+
+def draw_input_mode_badge(surface, link, font_small):
+    """Small tag in the bottom-left so everyone can see which input is live."""
+    if link is None:
+        text, color = "INPUT: MOUSE  (M = sensors)", COLOR_TEXT_SOFT
+    elif link.all_online():
+        text, color = "INPUT: SENSORS", COLOR_SENSOR_OK
+    else:
+        offline = [str(sid) for sid, ok in link.status().items() if not ok]
+        text, color = f"SENSOR {', '.join(offline)} LOST  (M = mouse)", COLOR_SENSOR_BAD
+    label = pygame.font.SysFont("arial", 14, bold=True).render(text, True, color)
+    box = label.get_rect(bottomleft=(12, SCREEN_HEIGHT - 10)).inflate(14, 8)
+    draw_glass_panel(surface, box, radius=8)
+    surface.blit(label, label.get_rect(center=box.center))
+
+
+def draw_step_in_hint(surface, font_small):
+    label = font_small.render("Step into the play area", True, COLOR_TEXT)
+    box = label.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 40)).inflate(30, 14)
+    draw_glass_panel(surface, box, radius=12)
+    surface.blit(label, label.get_rect(center=box.center))
+
+
+def run_game(orientation=None, fullscreen=None, use_sensors=None):
     """
     orientation: "landscape", "portrait" or "auto".  None = use the command
     line flags (--portrait / --landscape) or the ORIENTATION setting.
+    use_sensors: True = ESP32/UDP input, False = mouse.  None = --sensors /
+    --mouse flag, otherwise mouse.
     """
     global ACTIVE_DISPLAY
 
@@ -1421,6 +1484,8 @@ def run_game(orientation=None, fullscreen=None):
         orientation = cli_orientation
     if fullscreen is None:
         fullscreen = cli_fullscreen
+    if use_sensors is None:
+        use_sensors = bool(parse_input_mode(sys.argv[1:]))
 
     pygame.init()
     configure_layout(resolve_orientation(orientation))
@@ -1435,6 +1500,8 @@ def run_game(orientation=None, fullscreen=None):
     font_big = pygame.font.SysFont("arial", 48, bold=True)
     font_title = pygame.font.SysFont("arial", 44, bold=True)
     font_popup = pygame.font.SysFont("arial", 24, bold=True)
+
+    link = open_sensor_link() if use_sensors else None
 
     def new_game_state():
         return {
@@ -1493,6 +1560,71 @@ def run_game(orientation=None, fullscreen=None):
         else:
             prepare_level_transition()
 
+    def perform_whack(click_pos, now):
+        """One whack at click_pos (from a mouse click or a sensor whack event)."""
+        state["hit_flash_until"] = now + 150
+        state["hammer_effect"] = (click_pos, now)
+        mole = state["mole"]
+
+        if mole.contains(click_pos):
+            mole.register_hit(now)
+            reaction = mole.reaction_time_seconds(now)
+            state["last_reaction_seconds"] = reaction
+
+            # Red mole is a hazard: it costs points and breaks the combo.
+            if mole.mole_type == "red":
+                state["score"] = max(0, state["score"] + mole.base_points())
+                state["combo"] = 0
+                popup_text = f"{mole.base_points()} AVOID RED!"
+                popup_color = COLOR_WARNING
+            else:
+                state["hits_this_level"] += 1
+                state["combo"] += 1
+
+                if reaction <= REACTION_FAST_SECONDS:
+                    reaction_bonus = REACTION_FAST_BONUS
+                    reaction_label = "FAST!"
+                elif reaction <= REACTION_GOOD_SECONDS:
+                    reaction_bonus = REACTION_GOOD_BONUS
+                    reaction_label = "QUICK!"
+                else:
+                    reaction_bonus = 0
+                    reaction_label = ""
+
+                if state["combo"] >= COMBO_X3_AT:
+                    multiplier = 3
+                elif state["combo"] >= COMBO_X2_AT:
+                    multiplier = 2
+                else:
+                    multiplier = 1
+
+                gained = (mole.base_points() + reaction_bonus) * multiplier
+                state["score"] += gained
+
+                if mole.mole_type == "blue":
+                    state["time_bonus_seconds"] += 3.0
+
+                extras = []
+                if reaction_label:
+                    extras.append(reaction_label)
+                if multiplier > 1:
+                    extras.append(f"x{multiplier}")
+                if mole.mole_type == "blue":
+                    extras.append("+3s")
+                popup_text = f"+{gained}" + (" " + " ".join(extras) if extras else "")
+                popup_color = COLOR_POPUP
+
+            state["popups"].append(
+                FloatingText(mole.position, popup_text, popup_color, font_popup, life_ms=850)
+            )
+            state["dust_puffs"].append(DustPuff(mole.position))
+            state["shake_until"] = now + 120
+            state["shake_strength"] = 5
+
+            level = LEVELS[state["level"]]
+            if state["hits_this_level"] >= level["hits_required"]:
+                complete_current_level()
+
     running = True
     while running:
         now = pygame.time.get_ticks()
@@ -1507,6 +1639,15 @@ def run_game(orientation=None, fullscreen=None):
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
+
+                elif event.key == pygame.K_m:
+                    # Demo backup: swap between the ESP32 sensors and the mouse.
+                    if link is None:
+                        link = open_sensor_link()
+                    else:
+                        link.close()
+                        link = None
+                        state["sensor_status"] = dict(DEFAULT_SENSOR_STATUS)
 
                 elif event.key == pygame.K_F11:
                     display.toggle_fullscreen()
@@ -1528,7 +1669,7 @@ def run_game(orientation=None, fullscreen=None):
                     start_round()
 
                 elif state["stage"] == STAGE_CALIBRATION:
-                    if event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
+                    if event.key in (pygame.K_1, pygame.K_2, pygame.K_3) and link is None:
                         sensor_id = int(event.unicode)
                         state["sensor_status"][sensor_id] = not state["sensor_status"][sensor_id]
                     elif event.key == pygame.K_SPACE and sensors_ready(state["sensor_status"]):
@@ -1538,8 +1679,8 @@ def run_game(orientation=None, fullscreen=None):
                     begin_level_play()
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                # Temporary prototype control: ONE left-click = one whack.
-                # Later this block can be triggered by the ESP32/sensor hit event.
+                # Mouse mode: ONE left-click = one whack.  In sensor mode the
+                # whack comes from sensor_link instead (see below the event loop).
                 if event.button != 1:
                     continue
 
@@ -1547,76 +1688,24 @@ def run_game(orientation=None, fullscreen=None):
                     start_round()
                     continue
 
-                if state["stage"] != STAGE_PLAYING:
+                if state["stage"] != STAGE_PLAYING or link is not None:
                     continue
 
-                click_pos = window_to_game(event.pos)
-                state["hit_flash_until"] = now + 150
-                state["hammer_effect"] = (click_pos, now)
-                mole = state["mole"]
+                perform_whack(window_to_game(event.pos), now)
 
-                if mole.contains(click_pos):
-                    mole.register_hit(now)
-                    reaction = mole.reaction_time_seconds(now)
-                    state["last_reaction_seconds"] = reaction
+        # Player position: mouse, or the hole zone the sensors put them in.
+        if link is not None:
+            link.poll()
+            state["sensor_status"] = link.status()
+        cursor_pos = get_player_position(window_to_game(pygame.mouse.get_pos()), link)
+        too_close = player_is_too_close_to_screen(cursor_pos, link)
 
-                    # Red mole is a hazard: it costs points and breaks the combo.
-                    if mole.mole_type == "red":
-                        state["score"] = max(0, state["score"] + mole.base_points())
-                        state["combo"] = 0
-                        popup_text = f"{mole.base_points()} AVOID RED!"
-                        popup_color = COLOR_WARNING
-                    else:
-                        state["hits_this_level"] += 1
-                        state["combo"] += 1
-
-                        if reaction <= REACTION_FAST_SECONDS:
-                            reaction_bonus = REACTION_FAST_BONUS
-                            reaction_label = "FAST!"
-                        elif reaction <= REACTION_GOOD_SECONDS:
-                            reaction_bonus = REACTION_GOOD_BONUS
-                            reaction_label = "QUICK!"
-                        else:
-                            reaction_bonus = 0
-                            reaction_label = ""
-
-                        if state["combo"] >= COMBO_X3_AT:
-                            multiplier = 3
-                        elif state["combo"] >= COMBO_X2_AT:
-                            multiplier = 2
-                        else:
-                            multiplier = 1
-
-                        gained = (mole.base_points() + reaction_bonus) * multiplier
-                        state["score"] += gained
-
-                        if mole.mole_type == "blue":
-                            state["time_bonus_seconds"] += 3.0
-
-                        extras = []
-                        if reaction_label:
-                            extras.append(reaction_label)
-                        if multiplier > 1:
-                            extras.append(f"x{multiplier}")
-                        if mole.mole_type == "blue":
-                            extras.append("+3s")
-                        popup_text = f"+{gained}" + (" " + " ".join(extras) if extras else "")
-                        popup_color = COLOR_POPUP
-
-                    state["popups"].append(
-                        FloatingText(mole.position, popup_text, popup_color, font_popup, life_ms=850)
-                    )
-                    state["dust_puffs"].append(DustPuff(mole.position))
-                    state["shake_until"] = now + 120
-                    state["shake_strength"] = 5
-
-                    level = LEVELS[state["level"]]
-                    if state["hits_this_level"] >= level["hits_required"]:
-                        complete_current_level()
-
-        # This remains mouse-driven for now. Later, replace the body of
-        # get_player_position() with the UDP / XYZ sensor position.
-        cursor_pos = get_player_position(window_to_game(pygame.mouse.get_pos()))
+        if link is not None:
+            # Buzzer follows the dead zone in every screen, not just gameplay.
+            link.set_buzzer(too_close)
+            whack = link.take_whack()
+            if whack and state["stage"] == STAGE_PLAYING and cursor_pos is not None:
+                perform_whack(cursor_pos, now)
 
         if state["stage"] == STAGE_TITLE:
             draw_title_screen(render_target, now, font_title, font_small)
@@ -1624,8 +1713,9 @@ def run_game(orientation=None, fullscreen=None):
 
         elif state["stage"] == STAGE_CALIBRATION:
             draw_sensor_calibration(
-                render_target, now, font_big, font_small, state["sensor_status"]
+                render_target, now, font_big, font_small, state["sensor_status"], link
             )
+            draw_input_mode_badge(render_target, link, font_small)
             display.present()
 
         elif state["stage"] == STAGE_LEVEL_TRANSITION:
@@ -1699,7 +1789,11 @@ def run_game(orientation=None, fullscreen=None):
                 level["time"],
             )
 
-            if player_is_too_close_to_screen(cursor_pos):
+            if link is not None and cursor_pos is None and not too_close:
+                draw_step_in_hint(render_target, font_small)
+            draw_input_mode_badge(render_target, link, font_small)
+
+            if too_close:
                 draw_safety_warning(render_target, font)
 
             if now < state["shake_until"]:
@@ -1726,6 +1820,8 @@ def run_game(orientation=None, fullscreen=None):
 
         clock.tick(FPS)
 
+    if link is not None:
+        link.close()   # also switches the buzzer off
     pygame.quit()
     sys.exit()
 
