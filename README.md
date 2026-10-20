@@ -32,7 +32,8 @@ If no error message appears, the code has passed the syntax check.
 Run the game using:
 
 ```bash
-python3 whack_a_mole.py
+python3 v2.py              # mouse
+python3 play_with_sensors.py   # ESP32 sensors
 ```
 
 ## How to Play
@@ -127,6 +128,51 @@ python3 -m pip install pygame
 python3 -m py_compile whack_a_mole.py
 python3 whack_a_mole.py
 ```
+
+## Playing with the ESP32 sensors
+
+The three sensor boxes stand on the wall under the screen (Box 1 left, Box 2
+middle, Box 3 right) facing the player. Each one sends its distance to the PC
+over Wi-Fi/UDP.
+
+- **Column** = which sensor sees the player
+- **Row** = how far they are from the wall (60–200 cm, split into 3 rows)
+- **Whack** = step into a hole's zone and hold still for ~0.35 s (step out and
+  back in to whack the same hole again)
+- **Closer than 60 cm** = warning on screen + buzzer on Box 2
+
+### Setup
+
+1. Open `esp32/sensor_box/sensor_box.ino`, set `WIFI_SSID`, `WIFI_PASSWORD`
+   and `PC_IP` (run `ipconfig` on the PC), then upload it to each board with
+   `SENSOR_ID` set to 1, 2 and 3.
+2. Put the PC and all three boxes on the same Wi-Fi network. Allow Python
+   through Windows Firewall the first time it asks.
+3. Run:
+
+```
+python play_with_sensors.py --fullscreen
+```
+
+4. The Sensor Check screen shows each box's live distance. Press SPACE when
+   all three are connected.
+
+**Press `M` at any time to switch to the mouse** (demo backup if Wi-Fi drops),
+and `M` again to go back to the sensors.
+
+All tuning values (ports, dead zone, which box has the buzzer, whack hold
+time, sensor-to-column order) are at the top of `sensor_link.py`.
+
+### Testing without hardware
+
+```
+python play_with_sensors.py
+python tools/fake_sensors.py              # in a second terminal
+python -m unittest discover tests         # logic tests
+```
+
+`fake_sensors.py` walks a pretend player through all 9 holes and into the
+dead zone. `--fixed 100 200 300` sends fixed values instead.
 
 ## Technologies Used
 
