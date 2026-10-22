@@ -1,18 +1,18 @@
 """
 Zoned Whack-a-Mole tracker  (time-division firing + weighted-blend lateral)
 ==========================================================================
-Polls the 3 ESP32 ultrasonic sensors over WiFi ONE AT A TIME and sends the
+Polls the 4 ESP32 ultrasonic sensors over WiFi ONE AT A TIME and sends the
 player's position to the Processing sketch over OSC.
 
 TIME-DIVISION FIRING (new)
-  Before, all 3 boards free-ran and sometimes pinged at the same instant, so a
+  Before, all boards free-ran and sometimes pinged at the same instant, so a
   sensor could hear ANOTHER sensor's echo and report a fake distance. That is
   what threw the avatar to the top-right and back.
   Now this script is the conductor: it sends "FIRE" to one board, waits for its
   reply (or a timeout), waits a short guard gap for the echo to die out, then
   moves to the next board. Only one sensor is ever pinging -> no crosstalk.
-  Order is LEFT -> RIGHT -> MID so back-to-back pings come from far-apart
-  sensors. Boards announce themselves with "HELLO <ID>" so no IPs to type in.
+  Order is LEFT -> MID2 -> MID -> RIGHT so back-to-back pings come from
+  far-apart sensors. Boards announce themselves with "HELLO <ID>" so no IPs to type in.
 
 LATERAL (overlap fix)
   Lateral position is a softmax-weighted blend of every sensor that sees the
@@ -24,9 +24,9 @@ GHOST-READING GUARD
 
 DATA IN  (UDP 9000): "LEFT 123.45" (id + cm, -1 = no echo) and "HELLO LEFT"
 DATA OUT (UDP 9002 to boards): "FIRE"
-DATA OUT (OSC 9001): /avatar [depth_cm, lateral_frac, left, mid, right]
-                     /boards [left_online, mid_online, right_online]  (1/0)
-                     /stats  [hz x3, reply% x3, round-trip ms x3]     (once a second)
+DATA OUT (OSC 9001): /avatar [depth_cm, lateral_frac, d_1 .. d_N]   (raw cm per sensor, SENSORS order)
+                     /boards [online_1 .. online_N]                (1/0)
+                     /stats  [hz xN, reply% xN, round-trip ms xN]  (once a second)
 Boards find this PC by itself (they broadcast HELLO) - no IP to configure.
 
 Requires:  pip install python-osc
@@ -54,14 +54,20 @@ OSC_OUT_PORT = 9001
 SEND_HZ = 60
 
 # ------------------------------------------------------------------ TIME-DIVISION
-FIRE_ORDER = ["LEFT", "RIGHT", "MID"]   # far-apart sensors back to back
+# ------------------------------------------------------------------ SENSOR LAYOUT
+# (board SENSOR_ID, x position across the play area in cm), listed LEFT -> RIGHT.
+# 4 sensors, all facing STRAIGHT ahead, one per 37.5 cm lane (lane centres).
+# Want the old 3-sensor setup back? Use [("LEFT", 25), ("MID", 75), ("RIGHT", 125)]
+# and FIRE_ORDER = ["LEFT", "RIGHT", "MID"].
+SENSORS = [("LEFT", 18.75), ("MID", 56.25), ("MID2", 93.75), ("RIGHT", 131.25)]
+FIRE_ORDER = ["LEFT", "MID2", "MID", "RIGHT"]   # far-apart sensors back to back
 REPLY_TIMEOUT_MS = 60         # give up on a board's reply after this
 GUARD_MS = 10                 # quiet gap after each ping so the echo dies out
 BOARD_ONLINE_MS = 1000        # a board counts as online if we heard from it this recently
 
 # ------------------------------------------------------------------ DETECTION
 MAX_DETECT_CM = 250.0
-SENSOR_STALE_MS = 350         # each sensor now updates ~every 75ms, so allow a bit more
+SENSOR_STALE_MS = 400         # 4 sensors -> each updates ~every 170ms, so allow a bit more
 HYSTERESIS_CM = 20.0
 
 # ------------------------------------------------------------------ SMOOTHING
@@ -83,8 +89,9 @@ CONFIRM_COUNT = 2
 CONFIRM_TOL_CM = 15.0
 MIN_VALID_CM = 20.0
 
-COLUMNS = {"LEFT": 0, "MID": 1, "RIGHT": 2}
-NUM_COLS = 3
+NAMES = [n for n, _ in SENSORS]
+SENSOR_X = dict(SENSORS)
+assert sorted(FIRE_ORDER) == sorted(NAMES), "FIRE_ORDER must list every sensor once"
 
 
 def ms():
@@ -148,7 +155,8 @@ class SensorReader:
 
 
 def pick_column(seen, current_col):
-    """Which column owns DEPTH? Nearest sensor, with hysteresis to stop flicker."""
+    """Which sensor owns DEPTH? Nearest sensor, with hysteresis to stop flicker.
+    seen = [(sensor_name, distance_cm), ...]"""
     if not seen:
         return current_col, None
     best_col, best_dist = min(seen, key=lambda t: t[1])
@@ -163,16 +171,17 @@ def pick_column(seen, current_col):
 
 
 def lateral_target(seen):
-    """Softmax-weighted blend of every sensor that sees the player."""
+    """Softmax-weighted blend of the x position of every sensor that sees the
+    player (nearest = heaviest). Returns 0..1 across the play width."""
     if not seen:
         return None
     d_min = min(d for _, d in seen)
     num = den = 0.0
-    for col, d in seen:
+    for name, d in seen:
         w = math.exp(-(d - d_min) / LATERAL_TAU_CM)
-        num += col * w
+        num += SENSOR_X[name] * w
         den += w
-    return (num / den + 0.5) / NUM_COLS
+    return clamp((num / den) / PLAY_WIDTH_CM, 0.0, 1.0)
 
 
 class Poller:
@@ -267,7 +276,7 @@ def handle_packet(data, addr, readers, poller):
 
 
 def main():
-    readers = {name: SensorReader(name) for name in COLUMNS}
+    readers = {name: SensorReader(name) for name in NAMES}
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("0.0.0.0", UDP_LISTEN_PORT))
@@ -306,7 +315,7 @@ def main():
 
                 # 3) snapshot sensors
                 cur = {name: r.current() for name, r in readers.items()}
-                seen = [(COLUMNS[name], d) for name, d in cur.items() if d is not None]
+                seen = [(name, d) for name, d in cur.items() if d is not None]
 
                 # 4) depth source + continuous lateral blend, eased
                 active_col, active_dist = pick_column(seen, active_col)
@@ -322,35 +331,28 @@ def main():
                 deadzone = nearest is not None and nearest < DEADZONE_CM
 
                 # 6) send to Processing
-                l, m, rr = cur["LEFT"], cur["MID"], cur["RIGHT"]
-                osc.send_message("/avatar", [
-                    float(depth),
-                    float(lateral),
-                    float(l if l is not None else -1.0),
-                    float(m if m is not None else -1.0),
-                    float(rr if rr is not None else -1.0),
-                ])
-                # Board health (1 = heard from it in the last second), order LEFT, MID, RIGHT.
-                # Used by the pygame game's Sensor Check screen; Processing ignores it.
+                osc.send_message("/avatar", [float(depth), float(lateral)] + [
+                    float(cur[n]) if cur[n] is not None else -1.0 for n in NAMES])
+                # Board health (1 = heard from it in the last second), SENSORS order.
+                # Used by the pygame game's Sensor Check screen.
                 osc.send_message("/boards", [
                     int(now - poller.last_seen.get(name, -BOARD_ONLINE_MS) < BOARD_ONLINE_MS)
-                    for name in ("LEFT", "MID", "RIGHT")
+                    for name in NAMES
                 ])
                 # Performance stats once a second (for hd_tests.py):
-                # [hz L,M,R, reply% L,M,R, round-trip ms L,M,R]
+                # [hz x N, reply% x N, round-trip ms x N], SENSORS order
                 if poller.roll_stats():
-                    order = ("LEFT", "MID", "RIGHT")
                     osc.send_message("/stats",
-                        [float(poller.stats[k][n]) for k in ("hz", "ok", "rtt") for n in order])
+                        [float(poller.stats[k][n]) for k in ("hz", "ok", "rtt") for n in NAMES])
 
                 if now - last_print > 500:
-                    col_name = ["LEFT", "MID", "RIGHT"][active_col] if active_col is not None else "----"
+                    col_name = active_col or "----"
                     warn = "   !!! DEAD ZONE !!!" if deadzone else ""
-                    boards = ",".join(n for n in FIRE_ORDER if n in poller.addrs) or "none"
-                    print(f"col: {col_name:5} depth: {depth:5.1f}/{USABLE_DEPTH_CM:.0f}cm "
-                          f"lat: {lateral:.2f}  (L={fmt(l)} M={fmt(m)} R={fmt(rr)})  boards: {boards}  "
-                          f"Hz L/M/R: {poller.stats['hz']['LEFT']:.0f}/{poller.stats['hz']['MID']:.0f}/"
-                          f"{poller.stats['hz']['RIGHT']:.0f}{warn}")
+                    boards = ",".join(n for n in NAMES if n in poller.addrs) or "none"
+                    dists = " ".join(f"{n}={fmt(cur[n])}" for n in NAMES)
+                    hz = "/".join(f"{poller.stats['hz'][n]:.0f}" for n in NAMES)
+                    print(f"near: {col_name:5} depth: {depth:5.1f}/{USABLE_DEPTH_CM:.0f}cm "
+                          f"lat: {lateral:.2f}  ({dists})  boards: {boards}  Hz: {hz}{warn}")
                     last_print = now
 
             time.sleep(0.001)   # 1ms tick keeps the schedule tight without maxing a CPU core

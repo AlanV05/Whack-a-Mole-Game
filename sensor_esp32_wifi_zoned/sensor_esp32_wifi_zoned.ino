@@ -3,7 +3,7 @@
   TIME-DIVISION version: the board only fires when the PC tells it to.
   =====================================================================
   Upload this SAME sketch to all 3 boards. On each board, change SENSOR_ID
-  to "LEFT", "MID", or "RIGHT".
+  to "LEFT", "MID", "MID2", or "RIGHT".
 
   HOW IT WORKS
     The PC (sensor_to_processing_zoned.py) sends "FIRE" to one board at a
@@ -33,11 +33,11 @@
 
 // ---------------- SET THESE ----------------
 const char* WIFI_SSID = "AlanV";
-const char* WIFI_PASS = "jesalaalv76";
+const char* WIFI_PASS = "****";
 const char* PC_IP     = "172.20.10.14";   // your PC's IPv4 address
 const int   PC_PORT   = 9000;             // must match UDP_LISTEN_PORT in the Python
 const int   POLL_PORT = 9002;             // must match POLL_PORT in the Python
-const char* SENSOR_ID = "RIGHT";           // "LEFT" / "MID" / "RIGHT"  -- change per board
+const char* SENSOR_ID = "MID2";           // "LEFT" / "MID" / "MID2"/ "RIGHT"  -- change per board
 // --------------------------------------------
 
 #define TRIG_PIN 25
