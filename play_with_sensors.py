@@ -65,8 +65,11 @@ AUTO_WHACK = True
 AUTO_WHACK_DWELL_MS = 0         # 0 = instant hit the moment you're on the mole
 FALLBACK_SAFETY_CM = 50.0       # used only if the game doesn't define its own
 
-# The V2 game numbers its sensors 1/2/3. Index into [LEFT, MID, RIGHT].
-GAME_SENSOR_TO_BOARD = {1: 0, 2: 1, 3: 2}
+# The team's game shows 3 sensor slots (1/2/3). Each slot lists the boards it
+# stands for, by index into the tracker's SENSORS order [LEFT, MID, MID2, RIGHT].
+# Slot 2 ("middle") is only green when BOTH middle boards are online.
+# Back on 3 sensors? Use {1: [0], 2: [1], 3: [2]}.
+GAME_SENSOR_TO_BOARD = {1: [0], 2: [1, 2], 3: [3]}
 
 
 # ------------------------------------------------------------------ SENSOR FEED
@@ -77,25 +80,25 @@ class SensorFeed:
         self.lock = threading.Lock()
         self.depth = 0.0
         self.lateral = 0.5
-        self.raw = [-1.0, -1.0, -1.0]      # LEFT, MID, RIGHT distances in cm
-        self.boards = [0, 0, 0]            # LEFT, MID, RIGHT online flags
+        self.raw = []                      # distance per sensor in cm (-1 = none)
+        self.boards = []                   # online flag per sensor
         self.last_avatar = 0.0
         self.last_boards = 0.0
 
     def on_avatar(self, _addr, *args):
-        if len(args) < 5:
+        if len(args) < 3:
             return
         with self.lock:
             self.depth = float(args[0])
             self.lateral = float(args[1])
-            self.raw = [float(args[2]), float(args[3]), float(args[4])]
+            self.raw = [float(a) for a in args[2:]]
             self.last_avatar = time.time()
 
     def on_boards(self, _addr, *args):
-        if len(args) < 3:
+        if not args:
             return
         with self.lock:
-            self.boards = [int(a) for a in args[:3]]
+            self.boards = [int(a) for a in args]
             self.last_boards = time.time()
 
     def live(self):
@@ -297,7 +300,8 @@ def hook_up(game, feed):
     # --- V2 Sensor Check screen shows real board status
     def live_status():
         _, _, _, boards = feed.snapshot()
-        return {gid: bool(boards[idx]) for gid, idx in GAME_SENSOR_TO_BOARD.items()}
+        return {gid: all(i < len(boards) and boards[i] for i in idxs)
+                for gid, idxs in GAME_SENSOR_TO_BOARD.items()}
 
     if hasattr(game, "sensors_ready"):
         original_ready = game.sensors_ready

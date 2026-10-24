@@ -64,21 +64,21 @@ LINE, TARGET, GOOD, BAD, DOT = (70, 75, 85), (255, 200, 60), (80, 200, 120), (23
 class Feed:
     def __init__(self):
         self.lock = threading.Lock()
-        self.depth, self.lateral, self.raw = 0.0, 0.5, [-1.0] * 3
+        self.depth, self.lateral, self.raw = 0.0, 0.5, []
         self.t_avatar = 0.0
-        self.stats_log = []               # rows of 9 floats from /stats
+        self.stats_log = []               # rows of 3N floats from /stats (N = sensors)
 
     def avatar(self, _a, *args):
-        if len(args) >= 5:
+        if len(args) >= 3:
             with self.lock:
                 self.depth, self.lateral = float(args[0]), float(args[1])
-                self.raw = [float(v) for v in args[2:5]]
+                self.raw = [float(v) for v in args[2:]]
                 self.t_avatar = time.time()
 
     def stats(self, _a, *args):
-        if len(args) >= 9:
+        if len(args) >= 3 and len(args) % 3 == 0:
             with self.lock:
-                self.stats_log.append([float(v) for v in args[:9]])
+                self.stats_log.append([float(v) for v in args])
 
     def live(self):
         return time.time() - self.t_avatar < 1.0
@@ -177,7 +177,9 @@ class App:
                   (20, H - 30), self.fs, GOOD if live else BAD)
         if self.feed.stats_log:
             s = self.feed.stats_log[-1]
-            self.text(f"update Hz L/M/R {s[0]:.0f}/{s[1]:.0f}/{s[2]:.0f}   reply % {s[3]:.0f}/{s[4]:.0f}/{s[5]:.0f}",
+            n = len(s) // 3
+            self.text(f"update Hz {'/'.join(f'{v:.0f}' for v in s[:n])}   "
+                      f"reply % {'/'.join(f'{v:.0f}' for v in s[n:2 * n])}",
                       (470, H - 30), self.fs, SOFT)
 
     # ---------------- menu
@@ -200,7 +202,7 @@ class App:
         if self.feed.live():
             d, lat, raw = self.feed.read()
             self.text(f"now: {cell_name(cell_of(d, lat))}   depth {d:.0f}cm   lateral {lat:.2f}   "
-                      f"raw L/M/R {raw[0]:.0f}/{raw[1]:.0f}/{raw[2]:.0f}", (W // 2, 380), self.fs, SOFT, True)
+                      f"raw {'/'.join(f'{v:.0f}' for v in raw)}", (W // 2, 380), self.fs, SOFT, True)
 
     # ---------------- trials
     def start_accuracy(self):
@@ -362,7 +364,7 @@ class App:
                 w.writerow(["safety", f"{r['zone']}: {r['position']}", "warning_on_pct",
                             f"{r['warning_on_pct']:.1f}", "PASS" if r["pass"] else "FAIL"])
             for row in self.feed.stats_log:
-                w.writerow(["link_stats", "L/M/R", "hz|reply%|rtt_ms", "|".join(f"{v:.1f}" for v in row), ""])
+                w.writerow(["link_stats", f"{len(row) // 3} sensors, left->right", "hz|reply%|rtt_ms", "|".join(f"{v:.1f}" for v in row), ""])
 
         lines = [f"ENGG3000 V2 performance results - {datetime.now():%d %b %Y %H:%M}", ""]
         if self.acc:
@@ -392,10 +394,12 @@ class App:
         if self.feed.stats_log:
             cols = list(zip(*self.feed.stats_log))
             m = [statistics.mean(c) for c in cols]
-            lines += ["WIRELESS LINK (time-division polling)",
-                      f"  update rate per sensor L/M/R: {m[0]:.1f} / {m[1]:.1f} / {m[2]:.1f} Hz",
-                      f"  reply success L/M/R: {m[3]:.1f} / {m[4]:.1f} / {m[5]:.1f} %",
-                      f"  WiFi round-trip L/M/R: {m[6]:.0f} / {m[7]:.0f} / {m[8]:.0f} ms",
+            n = len(m) // 3
+            j = lambda vals, f: " / ".join(f"{v:{f}}" for v in vals)
+            lines += [f"WIRELESS LINK (time-division polling, {n} sensors, left -> right)",
+                      f"  update rate per sensor: {j(m[:n], '.1f')} Hz",
+                      f"  reply success: {j(m[n:2 * n], '.1f')} %",
+                      f"  WiFi round-trip: {j(m[2 * n:], '.0f')} ms",
                       f"  ({len(self.feed.stats_log)} seconds logged)"]
         (out / f"{stamp}_summary.txt").write_text("\n".join(lines) + "\n")
 
