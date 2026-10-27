@@ -15,7 +15,17 @@ things in at runtime before calling its run_game():
                                 so someone else can whack while you move.
                                 (Real jump detection is still TBD.)
   * player_is_too_close_to_screen()  -> real distance from the sensors.
-  * Sensor Check screen (V2 only)    -> real board status, not the 1/2/3 keys.
+  * Sensor Check screen (V2 only)    -> real board status, not the 1-4 keys.
+
+V2 COMPATIBILITY (Sprint 3 update)
+  V2 draws on a fixed-size canvas and scales it up to fill the monitor, so it
+  treats mouse positions as WINDOW pixels and converts them back with
+  window_to_game(). The sensor position is worked out in GAME pixels, so it is
+  now passed through the game's game_to_window() before being handed over
+  (cursor + every injected click). Older game versions without that function
+  are unaffected. The hole layout is also re-read every frame (the O key
+  switches landscape/portrait), and the Sensor Check screen now shows all
+  four boards one-to-one.
 
 If no sensor data is coming in, everything falls back to the normal mouse, so
 the game still works for testing without the rig.
@@ -65,11 +75,11 @@ AUTO_WHACK = True
 AUTO_WHACK_DWELL_MS = 0         # 0 = instant hit the moment you're on the mole
 FALLBACK_SAFETY_CM = 50.0       # used only if the game doesn't define its own
 
-# The team's game shows 3 sensor slots (1/2/3). Each slot lists the boards it
-# stands for, by index into the tracker's SENSORS order [LEFT, MID, MID2, RIGHT].
-# Slot 2 ("middle") is only green when BOTH middle boards are online.
-# Back on 3 sensors? Use {1: [0], 2: [1], 3: [2]}.
-GAME_SENSOR_TO_BOARD = {1: [0], 2: [1, 2], 3: [3]}
+# Sensor Check slots -> tracker boards, by index into the tracker's SENSORS
+# order [LEFT, MID, MID2, RIGHT]. Picked automatically from how many slots the
+# game shows (its DEFAULT_SENSOR_STATUS).
+SENSOR_SLOTS_4 = {1: [0], 2: [1], 3: [2], 4: [3]}   # V2: one slot per board
+SENSOR_SLOTS_3 = {1: [0], 2: [1, 2], 3: [3]}        # older 3-slot game: slot 2 = both middles
 
 
 # ------------------------------------------------------------------ SENSOR FEED
@@ -133,14 +143,11 @@ class GridMapper:
     Maps the tracker's (depth, lateral) onto the game's own hole grid, read from
     the game's HOLE_POSITIONS, so it lines up whatever layout the team uses.
     The play area is split into equal thirds each way: the middle of each third
-    lands exactly on a hole row/column.
+    lands exactly on a hole row/column. Returns GAME (canvas) pixels.
     """
 
     def __init__(self, game):
-        self.xs = sorted({p[0] for p in game.HOLE_POSITIONS})
-        self.ys = sorted({p[1] for p in game.HOLE_POSITIONS})
-        self.width = game.SCREEN_WIDTH
-        self.height = game.SCREEN_HEIGHT
+        self.game = game
         self.snap_col = None
         self.snap_row = None
 
@@ -163,23 +170,30 @@ class GridMapper:
         return max(0, min(n - 1, current))
 
     def map(self, depth_cm, lateral_frac):
+        # Read the layout live: V2 rebuilds HOLE_POSITIONS / SCREEN_WIDTH when
+        # the screen is switched landscape <-> portrait.
+        holes = self.game.HOLE_POSITIONS
+        xs = sorted({p[0] for p in holes})
+        ys = sorted({p[1] for p in holes})
+        width, height = self.game.SCREEN_WIDTH, self.game.SCREEN_HEIGHT
+
         x_frac = 1.0 - lateral_frac if MIRROR_X else lateral_frac
         y_frac = max(0.0, min(1.0, depth_cm / PLAY_DEPTH_CM))
         if FLIP_Y:
             y_frac = 1.0 - y_frac
 
-        col = self._continuous_index(x_frac, len(self.xs))
-        row = self._continuous_index(y_frac, len(self.ys))
+        col = self._continuous_index(x_frac, len(xs))
+        row = self._continuous_index(y_frac, len(ys))
 
         if SNAP_TO_HOLES:
-            self.snap_col = self._snap(col, self.snap_col, len(self.xs))
-            self.snap_row = self._snap(row, self.snap_row, len(self.ys))
+            self.snap_col = self._snap(col, self.snap_col, len(xs))
+            self.snap_row = self._snap(row, self.snap_row, len(ys))
             col, row = self.snap_col, self.snap_row
 
-        x = self._index_to_px(col, self.xs)
-        y = self._index_to_px(row, self.ys)
-        return (int(max(0, min(self.width - 1, x))),
-                int(max(0, min(self.height - 1, y))))
+        x = self._index_to_px(col, xs)
+        y = self._index_to_px(row, ys)
+        return (int(max(0, min(width - 1, x))),
+                int(max(0, min(height - 1, y))))
 
 
 # ------------------------------------------------------------------ LOADING + PATCHING
@@ -205,10 +219,15 @@ def hook_up(game, feed):
     real_get_pos = pygame.mouse.get_pos
     real_event_get = pygame.event.get
 
+    # V2 scales its canvas to the window and expects window pixels from the
+    # mouse; older versions draw 1:1 and have no converter (identity).
+    to_window = getattr(game, "game_to_window", None) or (lambda p: p)
+
     # The older version whacks on a DOUBLE click, V2 on a single click.
     clicks_per_whack = 2 if hasattr(game, "DOUBLE_CLICK_TIME_MS") else 1
 
     def player_pos():
+        """Player position in GAME pixels (same space as HOLE_POSITIONS / moles)."""
         if not feed.live():
             return None
         depth, lateral, _, _ = feed.snapshot()
@@ -217,7 +236,7 @@ def hook_up(game, feed):
     # --- cursor follows the player
     def sensor_get_pos():
         pos = player_pos()
-        return pos if pos is not None else real_get_pos()
+        return to_window(pos) if pos is not None else real_get_pos()
 
     # --- track which moles are on screen (every game version draws each mole every frame)
     live_moles = {}                      # id(mole) -> (mole, last_draw_ms)
@@ -231,14 +250,15 @@ def hook_up(game, feed):
         game.Mole.draw = tracked_draw
 
     dwell = {"mole": None, "since": 0}
-    already_whacked = set()
 
     def auto_whack_target(pos, now):
         """The mole the player has been standing on long enough, or None."""
         for key in [k for k, (_, t) in live_moles.items() if now - t > 200]:
             live_moles.pop(key, None)             # mole no longer drawn
         for key, (mole, _) in live_moles.items():
-            if key in already_whacked or getattr(mole, "hit", False):
+            # Flag lives on the mole itself: id() values get reused by new
+            # moles, which used to make some moles impossible to auto-whack.
+            if getattr(mole, "_sensor_whacked", False) or getattr(mole, "hit", False):
                 continue
             try:
                 on_it = mole.contains(pos)
@@ -249,7 +269,7 @@ def hook_up(game, feed):
             if dwell["mole"] != key:
                 dwell["mole"], dwell["since"] = key, now
             if now - dwell["since"] >= AUTO_WHACK_DWELL_MS:
-                already_whacked.add(key)
+                mole._sensor_whacked = True
                 dwell["mole"] = None
                 return mole
             return None
@@ -259,22 +279,24 @@ def hook_up(game, feed):
     # --- clicks / ENTER whack at the player's position
     def sensor_event_get(*args, **kwargs):
         events = real_event_get(*args, **kwargs)
-        pos = player_pos()
+        pos = player_pos()                                   # game pixels (for mole.contains)
+        win_pos = to_window(pos) if pos is not None else None  # what the game expects in events
         out = []
         if AUTO_WHACK and pos is not None and auto_whack_target(pos, pygame.time.get_ticks()):
             for _ in range(clicks_per_whack):
-                out.append(pygame.event.Event(pygame.MOUSEBUTTONDOWN, {"pos": pos, "button": 1}))
+                out.append(pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                              {"pos": win_pos, "button": 1}))
         for ev in events:
-            if (pos is not None
+            if (win_pos is not None
                     and ev.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP)
                     and getattr(ev, "button", 1) == 1):
                 data = dict(ev.dict)
-                data["pos"] = pos
+                data["pos"] = win_pos
                 out.append(pygame.event.Event(ev.type, data))
                 continue
             out.append(ev)
             if ev.type == pygame.KEYDOWN and ev.key == WHACK_KEY:
-                whack_at = pos if pos is not None else real_get_pos()
+                whack_at = win_pos if win_pos is not None else real_get_pos()
                 for _ in range(clicks_per_whack):
                     out.append(pygame.event.Event(pygame.MOUSEBUTTONDOWN,
                                                   {"pos": whack_at, "button": 1}))
@@ -297,11 +319,14 @@ def hook_up(game, feed):
 
         game.player_is_too_close_to_screen = sensor_too_close
 
-    # --- V2 Sensor Check screen shows real board status
+    # --- Sensor Check screen shows real board status
+    slot_count = len(getattr(game, "DEFAULT_SENSOR_STATUS", {}))
+    slots = SENSOR_SLOTS_4 if slot_count >= 4 else SENSOR_SLOTS_3
+
     def live_status():
         _, _, _, boards = feed.snapshot()
         return {gid: all(i < len(boards) and boards[i] for i in idxs)
-                for gid, idxs in GAME_SENSOR_TO_BOARD.items()}
+                for gid, idxs in slots.items()}
 
     if hasattr(game, "sensors_ready"):
         original_ready = game.sensors_ready
@@ -324,7 +349,7 @@ def hook_up(game, feed):
 
     auto = f"stand on a mole for {AUTO_WHACK_DWELL_MS}ms, or " if AUTO_WHACK else ""
     print(f"Whack = {auto}left-click / ENTER ({clicks_per_whack} click(s) sent per whack). "
-          "No sensor data -> falls back to the mouse.")
+          f"Sensor Check: {len(slots)} slots. No sensor data -> falls back to the mouse.")
 
 
 def main():
