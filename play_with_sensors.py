@@ -34,6 +34,8 @@ HOW TO RUN (two terminals, both with the venv active)
   1) python sensor_to_processing_zoned.py
   2) python play_with_sensors.py                   -> runs whack_a_moleV2.py
      python play_with_sensors.py whack_a_mole.py   -> runs another version
+     python play_with_sensors.py --display 1        -> force the game onto screen 1 (the TV)
+     python play_with_sensors.py --picture 0.95     -> shrink the picture if the TV cuts edges
   Don't run the Processing sketch at the same time: both listen on port 9001.
 
 Requires:  pip install pygame python-osc
@@ -353,7 +355,10 @@ def hook_up(game, feed):
 
 
 def main():
-    game_file = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_GAME
+    # first .py argument is the game file. Everything else (--display 1,
+    # --picture 0.95, --windowed ...) is left for the game to read.
+    py_args = [a for a in sys.argv[1:] if a.lower().endswith(".py")]
+    game_file = py_args[0] if py_args else DEFAULT_GAME
     game = load_game(game_file)
     feed = SensorFeed()
     start_osc_listener(feed)

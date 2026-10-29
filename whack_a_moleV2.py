@@ -47,6 +47,16 @@ Sprint 3 (final product) changes:
 - Four sensors on the Sensor Check screen.
 - Every level has its own scenery and colour, with clearer HUD text.
 
+TV + level intro update:
+- Mac: the menu bar and Dock are hidden while the game runs, so it fills the
+  whole TV (MAC_HIDE_MENU_BAR, or --keep-menu-bar for the old way).
+- - and = keys shrink / grow the picture if the TV cuts the edges off
+  (PICTURE_SCALE, or --picture 0.95).  D shows screen info.
+- Every level starts with an intro screen: what the moles do on this level,
+  what changed since the last one, and which moles can appear.
+- New mole types unlock one level at a time: L1 normal only, L2 + golden,
+  L3 + blue, L4 + red AVOID (see "mole_mix" in LEVELS).
+
 Sprint 2 additions in this version:
 - Multiple mole types, reaction bonus, combo score multipliers
 - Level transition screens and prototype sensor calibration/status UI
@@ -79,6 +89,24 @@ import math
 # and switched live with the O key on the title screen.  F11 toggles fullscreen.
 ORIENTATION = "auto"
 START_FULLSCREEN = True        # final product runs full screen; --windowed to turn off
+
+# Which screen the game opens on when a TV / projector is plugged in.
+#   "auto" = the BIGGEST screen (the TV, not the laptop)
+#   0, 1, 2 ... = a specific screen (0 = the laptop's main screen)
+# Or from the command line:  python whack_a_moleV2.py --display 1
+GAME_DISPLAY = "auto"
+
+# TV fix (Mac): hide the menu bar and Dock while the game is running, so the
+# game can cover the WHOLE screen. Without this the game stops at the menu bar,
+# which on a TV leaves a strip at the top and the picture doesn't fill it.
+# False (or --keep-menu-bar) = old behaviour, stay between menu bar and Dock.
+MAC_HIDE_MENU_BAR = True
+
+# Some TVs cut off the edges of the picture ("overscan"). If the HUD or the
+# bottom holes get cut off, shrink the picture a bit. 1.0 = fill the screen.
+# Change it live with the - and = keys, then copy the number it prints here
+# (or run with e.g. --picture 0.95).
+PICTURE_SCALE = 1.0
 
 LANDSCAPE = "landscape"
 PORTRAIT = "portrait"
@@ -119,28 +147,33 @@ LEVELS = [
         "time": 60,
         "mole_timeout": 3.5,
         "movement_speed": 1.0,
-        "hits_required": 8
+        "hits_required": 8,
+        # which moles can appear on this level, and how often (weights)
+        "mole_mix": {"normal": 100},
     },
     {
         "name": "Quick Whack",
         "time": 60,
         "mole_timeout": 3.0,
         "movement_speed": 1.2,
-        "hits_required": 12
+        "hits_required": 12,
+        "mole_mix": {"normal": 80, "golden": 20},                      # NEW: golden
     },
     {
         "name": "Mole Rush",
         "time": 60,
         "mole_timeout": 2.5,
         "movement_speed": 1.45,
-        "hits_required": 16
+        "hits_required": 16,
+        "mole_mix": {"normal": 72, "golden": 16, "blue": 12},          # NEW: blue
     },
     {
         "name": "Expert Mode",
         "time": 60,
         "mole_timeout": 2.0,
         "movement_speed": 1.75,
-        "hits_required": 20
+        "hits_required": 20,
+        "mole_mix": {"normal": 70, "golden": 15, "blue": 7, "red": 8},  # NEW: red
     }
 ]
 
@@ -149,6 +182,9 @@ LEVELS = [
 # ---------------------------------------------------------------------------
 # Mole types are chosen randomly.  Keep this PC-side so ESP32 sensor code
 # only has to report player position / hit events.
+# New mole types are unlocked one level at a time (see "mole_mix" in LEVELS):
+#   L1 normal only, L2 + golden, L3 + blue, L4 + red AVOID.
+# The weights below are only used if a level has no mole_mix.
 MOLE_TYPES = {
     "normal": {"weight": 70, "base_points": 1, "label": "NORMAL"},
     "golden": {"weight": 15, "base_points": 3, "label": "GOLD +3"},
@@ -166,8 +202,26 @@ REACTION_GOOD_BONUS = 1
 COMBO_X2_AT = 5
 COMBO_X3_AT = 10
 
-# Level-transition screen duration.
-LEVEL_TRANSITION_MS = 1800
+# Level intro screen: shown before every level so the player knows what's
+# coming. Starts the level by itself after this long, or press SPACE / ENTER.
+LEVEL_TRANSITION_MS = 8000
+
+# Average time the team measured for a player to walk into a square
+# (reach-time test). Used to show how much time is spare on each level.
+AVERAGE_WALK_S = 1.61
+
+# Words for each level's intro screen. The numbers (mole time, hits, speed)
+# are read from LEVELS so they can't get out of sync.
+LEVEL_INTROS = [
+    {"tagline": "Nice and easy. Get used to walking to each hole.",
+     "tip": "Plenty of time. Learn where the holes are on the floor."},
+    {"tagline": "Golden moles are here! They're worth 3 points.",
+     "tip": "Moles are quicker now, start moving as soon as one pops up."},
+    {"tagline": "Blue moles are here! Hit one for 3 extra seconds.",
+     "tip": "Less time per mole. Take the shortest path."},
+    {"tagline": "Red moles are here! DON'T hit them, they take 2 points.",
+     "tip": "Almost no time to spare. React fast, but check the colour first."},
+]
 
 # Prototype sensor status.  Later replace these booleans with UDP health
 # checks (for example: sensor is online if a packet arrived in the last second).
@@ -302,13 +356,15 @@ THEMES = [
 ]
 
 CURRENT_THEME = THEMES[0]
+CURRENT_LEVEL_INDEX = 0       # which level is being played, so moles know their mix
 
 
 def set_level_theme(level_index):
     """Switch the scenery to match a level (0-based)."""
-    global CURRENT_THEME
+    global CURRENT_THEME, CURRENT_LEVEL_INDEX
     index = min(max(0, level_index), len(THEMES) - 1)
     CURRENT_THEME = THEMES[index]
+    CURRENT_LEVEL_INDEX = min(max(0, level_index), len(LEVELS) - 1)
 
 # 3x3 grid of hole positions (placeholder layout for the playing area).
 # Same 3x3 grid in both orientations, so the sensor mapping (left/right ->
@@ -729,6 +785,43 @@ class StarBurst:
 # ---------------------------------------------------------------------------
 # Mole
 # ---------------------------------------------------------------------------
+def level_mole_mix(level_index):
+    """{mole type: weight} for a level. Falls back to every type if not set."""
+    level = LEVELS[min(max(0, level_index), len(LEVELS) - 1)]
+    mix = level.get("mole_mix")
+    if not mix:
+        mix = {name: info["weight"] for name, info in MOLE_TYPES.items()}
+    return mix
+
+
+def new_moles_on_level(level_index):
+    """Mole types that appear for the first time on this level."""
+    if level_index <= 0:
+        return []        # level 1 is the starting set, nothing is "new" yet
+    now_in = set(level_mole_mix(level_index))
+    before = set(level_mole_mix(level_index - 1))
+    return [name for name in mole_unlock_order() if name in now_in and name not in before]
+
+
+def mole_unlock_order():
+    """Mole types in the order they unlock (for the intro screen key)."""
+    order = []
+    for i in range(len(LEVELS)):
+        for name in level_mole_mix(i):
+            if name not in order:
+                order.append(name)
+    order += [name for name in MOLE_TYPES if name not in order]
+    return order
+
+
+def first_level_with(mole_type):
+    """1-based level where a mole type first shows up (None if never)."""
+    for i in range(len(LEVELS)):
+        if mole_type in level_mole_mix(i):
+            return i + 1
+    return None
+
+
 class Mole:
     SPAWNING = "spawning"
     IDLE = "idle"
@@ -746,8 +839,10 @@ class Mole:
         self.timeout = timeout
         self.movement_speed = movement_speed
 
-        mole_names = list(MOLE_TYPES.keys())
-        mole_weights = [MOLE_TYPES[name]["weight"] for name in mole_names]
+        # only the moles unlocked on this level can appear
+        mix = level_mole_mix(CURRENT_LEVEL_INDEX)
+        mole_names = list(mix.keys())
+        mole_weights = [mix[name] for name in mole_names]
         self.mole_type = random.choices(mole_names, weights=mole_weights, k=1)[0]
 
         self.blink_seed = random.uniform(0, 1000)
@@ -1548,29 +1643,184 @@ def draw_sensor_calibration(surface, now, font_big, font_small, sensor_status):
     surface.blit(test_note, test_note.get_rect(center=(panel.centerx, panel.bottom - 35)))
 
 
-def draw_level_transition(surface, now, font_big, font_small, level_number, level):
+_INTRO_FONTS = {}
+
+
+def _intro_font(size, bold=False):
+    # made once and reused, SysFont is slow to call every frame
+    key = (size, bold)
+    if key not in _INTRO_FONTS:
+        _INTRO_FONTS[key] = pygame.font.SysFont("arial", size, bold=bold)
+    return _INTRO_FONTS[key]
+
+
+def draw_mini_mole(surface, center, size, colors):
+    """Small mole icon for the intro screen's mole key (same body shape as in-game)."""
+    base, light, dark = colors
+    cx, cy = center
+    points = [(cx + nx * size, cy + ny * size) for nx, ny in MOLE_BODY_SILHOUETTE]
+    draw_shaded_polygon(surface, points, base, light, dark)
+    for side in (-1, 1):
+        pygame.draw.circle(surface, (30, 20, 15), (int(cx + side * size * 0.32), int(cy - size * 0.2)),
+                           max(2, int(size * 0.1)))
+    pygame.draw.circle(surface, (60, 40, 30), (int(cx), int(cy + size * 0.22)), max(2, int(size * 0.13)))
+
+
+def whats_new_text(level_index):
+    """One line saying what changed since the last level, worked out from LEVELS."""
+    if level_index == 0:
+        return "First level. Take it easy and learn where the holes are."
+    prev, cur = LEVELS[level_index - 1], LEVELS[level_index]
+    parts = []
+    less = prev["mole_timeout"] - cur["mole_timeout"]
+    if less > 0:
+        parts.append(f"moles stay up {less:.1f} s less")
+    faster = round((cur["movement_speed"] / prev["movement_speed"] - 1) * 100)
+    if faster > 0:
+        parts.append(f"pop up {faster}% faster")
+    more = cur["hits_required"] - prev["hits_required"]
+    if more > 0:
+        parts.append(f"{more} more hits to pass")
+    new = new_moles_on_level(level_index)
+    if new:
+        names = " and ".join(MOLE_KEY_INFO[n][0] for n in new)
+        parts.insert(0, f"{names} moles join in")
+    return "New: " + ", ".join(parts) + "." if parts else "Same as the last level."
+
+
+MOLE_KEY_INFO = {
+    "normal": ("Normal", "+1", (COLOR_MOLE, COLOR_MOLE_LIGHT, COLOR_MOLE_DARK)),
+    "golden": ("Golden", "+3", (COLOR_MOLE_GOLD, COLOR_MOLE_GOLD_LIGHT, COLOR_MOLE_GOLD_DARK)),
+    "blue":   ("Blue", "+1 and +3 s", (COLOR_MOLE_BLUE, COLOR_MOLE_BLUE_LIGHT, COLOR_MOLE_BLUE_DARK)),
+    "red":    ("Red", "AVOID  -2", (COLOR_MOLE_RED, COLOR_MOLE_RED_LIGHT, COLOR_MOLE_RED_DARK)),
+}
+
+
+def draw_level_transition(surface, now, font_big, font_small, level_number, level, time_left_ms=None):
+    """
+    Level intro: shown before every level so the player (and audience) know
+    what's coming. Numbers come straight from LEVELS.
+    """
     draw_background(surface, now)
     draw_holes(surface)
     overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-    overlay.fill((20, 25, 30, 115))
+    overlay.fill((20, 25, 30, 130))
     surface.blit(overlay, (0, 0))
 
-    panel = centred_panel(540, 270, 170)
+    index = level_number - 1
+    intro = LEVEL_INTROS[min(index, len(LEVEL_INTROS) - 1)]
+    accent = CURRENT_THEME.get("accent", COLOR_TITLE)
+
+    panel = centred_panel(780, 560, 45)
     draw_glass_panel(surface, panel, radius=22)
+    pygame.draw.rect(surface, accent, panel, width=3, border_radius=22)
+    cx = panel.centerx
 
-    heading = font_big.render(f"LEVEL {level_number}", True,
-                              CURRENT_THEME.get("accent", COLOR_TITLE))
-    name = font_small.render(f"{level['name']}  -  {CURRENT_THEME['name']}", True, COLOR_TEXT)
-    target = font_small.render(
-        f"Target: {level['hits_required']} hits   |   Mole speed x{level['movement_speed']}",
-        True, COLOR_TEXT_SOFT
-    )
-    prompt = font_small.render("Get ready!", True, (200, 80, 45))
+    def centre_text(text, font, color, y):
+        # shrink the text until it fits inside the panel (narrow portrait screens)
+        size, bold = next(k for k, f in _INTRO_FONTS.items() if f is font)
+        while size > 11 and font.size(text)[0] > panel.width - 36:
+            size -= 1
+            font = _intro_font(size, bold)
+        img = font.render(text, True, color)
+        surface.blit(img, img.get_rect(center=(cx, y)))
 
-    surface.blit(heading, heading.get_rect(center=(panel.centerx, panel.y + 65)))
-    surface.blit(name, name.get_rect(center=(panel.centerx, panel.y + 120)))
-    surface.blit(target, target.get_rect(center=(panel.centerx, panel.y + 165)))
-    surface.blit(prompt, prompt.get_rect(center=(panel.centerx, panel.y + 220)))
+    # --- heading
+    centre_text(f"LEVEL {level_number} of {len(LEVELS)}", _intro_font(46, True), accent, panel.y + 44)
+    centre_text(f"{level['name']}  |  {CURRENT_THEME['name']}", _intro_font(24, True), COLOR_TEXT,
+                panel.y + 88)
+    centre_text(intro["tagline"], _intro_font(19), COLOR_TEXT_SOFT, panel.y + 120)
+
+    # --- four stat boxes
+    pace = level["time"] / max(1, level["hits_required"])
+    stats = [
+        (f"{level['mole_timeout']:.1f} s", "each mole stays up"),
+        (f"{level['hits_required']}", "hits to pass"),
+        (f"x{level['movement_speed']:g}", "mole speed"),
+        (f"{pace:g} s", "1 hit every"),
+    ]
+    gap = 10
+    box_w = (panel.width - 40 - gap * 3) // 4
+    box_y, box_h = panel.y + 146, 86
+    for k, (value, label) in enumerate(stats):
+        box = pygame.Rect(panel.x + 20 + k * (box_w + gap), box_y, box_w, box_h)
+        pygame.draw.rect(surface, (246, 240, 230), box, border_radius=12)
+        pygame.draw.rect(surface, COLOR_PANEL_BORDER, box, width=2, border_radius=12)
+        val = _intro_font(34, True).render(value, True, accent)
+        surface.blit(val, val.get_rect(center=(box.centerx, box.y + 33)))
+        lab = _intro_font(15).render(label, True, COLOR_TEXT_SOFT)
+        surface.blit(lab, lab.get_rect(center=(box.centerx, box.y + 68)))
+
+    # --- what changed + tip
+    centre_text(whats_new_text(index), _intro_font(19, True), COLOR_TEXT, panel.y + 262)
+    spare = level["mole_timeout"] - AVERAGE_WALK_S
+    centre_text(f"{intro['tip']}  (about {spare:.1f} s spare after an average walk)",
+                _intro_font(16), COLOR_TEXT_SOFT, panel.y + 290)
+
+    # --- mole key (same on every level)
+    pygame.draw.line(surface, COLOR_PANEL_BORDER, (panel.x + 30, panel.y + 316),
+                     (panel.right - 30, panel.y + 316), 2)
+    centre_text("Moles on this level", _intro_font(16, True), COLOR_TEXT_SOFT, panel.y + 334)
+    unlocked = level_mole_mix(index)
+    new = new_moles_on_level(index)
+    col_w = (panel.width - 40) // 4
+    pulse = 0.5 + 0.5 * math.sin(now / 180.0)
+    for k, mole_type in enumerate(mole_unlock_order()):
+        name, points, colors = MOLE_KEY_INFO[mole_type]
+        mx = panel.x + 20 + col_w * k + col_w // 2
+        my = panel.y + 382
+        if mole_type in unlocked:
+            if mole_type in new:
+                draw_glow(surface, (mx, my), 46, colors[1], steps=5, max_alpha=int(80 + 80 * pulse))
+            draw_mini_mole(surface, (mx, my), 24, colors)
+            name_color = COLOR_TEXT
+            pt_color = COLOR_WARNING if mole_type == "red" else COLOR_TEXT_SOFT
+            sub = points
+        else:
+            # not unlocked yet: grey "?" so players can see more are coming
+            draw_mini_mole(surface, (mx, my), 24, ((200, 196, 188), (215, 212, 205), (175, 170, 162)))
+            q = _intro_font(22, True).render("?", True, (245, 242, 236))
+            surface.blit(q, q.get_rect(center=(mx, my + 2)))
+            name_color = (175, 170, 162)
+            pt_color = (175, 170, 162)
+            name = "???"
+            sub = f"Level {first_level_with(mole_type)}"
+        nm = _intro_font(17, True).render(name, True, name_color)
+        surface.blit(nm, nm.get_rect(center=(mx, panel.y + 424)))
+        pt = _intro_font(15, True).render(sub, True, pt_color)
+        surface.blit(pt, pt.get_rect(center=(mx, panel.y + 445)))
+        if mole_type in new:
+            badge = _intro_font(13, True).render("NEW!", True, (255, 255, 255))
+            b_rect = badge.get_rect(center=(mx + 26, my - 26)).inflate(12, 6)
+            pygame.draw.rect(surface, (215, 60, 45), b_rect, border_radius=8)
+            surface.blit(badge, badge.get_rect(center=b_rect.center))
+    centre_text("Hit fast for bonus points. 5 in a row = x2, 10 in a row = x3.",
+                _intro_font(15), COLOR_TEXT_SOFT, panel.y + 472)
+
+    # --- countdown bar
+    total = max(1, LEVEL_TRANSITION_MS)
+    left = total if time_left_ms is None else max(0, time_left_ms)
+    bar = pygame.Rect(panel.x + 60, panel.y + 500, panel.width - 120, 12)
+    pygame.draw.rect(surface, (225, 215, 200), bar, border_radius=6)
+    fill_w = int(bar.width * (1 - left / total))
+    if fill_w > 0:
+        pygame.draw.rect(surface, accent, (bar.x, bar.y, fill_w, bar.height), border_radius=6)
+    seconds = max(1, math.ceil(left / 1000))
+    centre_text(f"Get ready! Starting in {seconds}   (SPACE to start now)", _intro_font(18, True),
+                (200, 80, 45), panel.y + 534)
+
+
+def draw_display_info(surface, lines):
+    """Small box with screen info (D key, or after - / =). Helps set up the TV."""
+    font = _intro_font(16, True)
+    width = max(font.size(line)[0] for line in lines) + 30
+    box = pygame.Rect(12, SCREEN_HEIGHT - 20 - 24 * len(lines) - 12, width, 24 * len(lines) + 16)
+    shade = pygame.Surface(box.size, pygame.SRCALPHA)
+    shade.fill((15, 15, 20, 215))
+    surface.blit(shade, box.topleft)
+    for k, line in enumerate(lines):
+        img = font.render(line, True, (240, 240, 240))
+        surface.blit(img, (box.x + 15, box.y + 8 + 24 * k))
 
 
 def draw_game_over(surface, now, font_big, font_small, score, won=False):
@@ -1606,16 +1856,49 @@ def draw_game_over(surface, now, font_big, font_small, score, won=False):
 # ---------------------------------------------------------------------------
 # Display: window sizing, scaling and orientation switching
 # ---------------------------------------------------------------------------
-def desktop_size():
-    """Size of the main monitor (already rotated if Windows has it in portrait)."""
+def _screen_sizes():
     try:
-        sizes = pygame.display.get_desktop_sizes()
-        if sizes:
-            return sizes[0]
+        return list(pygame.display.get_desktop_sizes())
     except (AttributeError, pygame.error):
-        pass
+        return []
+
+
+def chosen_display():
+    """
+    Index of the screen the game should use: --display N on the command line,
+    else GAME_DISPLAY; "auto" picks the biggest screen, so with a TV plugged
+    into a laptop the game goes on the TV.
+    """
+    sizes = _screen_sizes()
+    if not sizes:
+        return 0
+    choice = GAME_DISPLAY
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg.lower() in ("--display", "--screen") and i + 1 < len(argv):
+            choice = argv[i + 1]
+        elif arg.lower().startswith(("--display=", "--screen=")):
+            choice = arg.split("=", 1)[1]
+    if str(choice).isdigit() and int(choice) < len(sizes):
+        return int(choice)
+    return max(range(len(sizes)), key=lambda k: sizes[k][0] * sizes[k][1])
+
+
+def desktop_size():
+    """Size of the screen the game runs on (see chosen_display)."""
+    sizes = _screen_sizes()
+    if sizes:
+        return sizes[chosen_display()]
     info = pygame.display.Info()
     return info.current_w, info.current_h
+
+
+def _set_mode(size, flags):
+    """set_mode on the chosen screen (older pygame without display= falls back)."""
+    try:
+        return pygame.display.set_mode(size, flags, display=chosen_display())
+    except TypeError:
+        return pygame.display.set_mode(size, flags)
 
 
 # Used only if the Mac's real menu bar / Dock area can't be read: room to leave
@@ -1625,11 +1908,12 @@ MAC_FALLBACK_BOTTOM = 80
 _USABLE_AREA = None
 
 
-def _mac_visible_frame():
+def _mac_visible_frame(full=False):
     """
-    Asks macOS (NSScreen.visibleFrame) which part of the main screen is NOT
-    covered by the menu bar or the Dock.  Returns (x, y, w, h) with y measured
-    from the top, in the same points SDL uses, or None if it can't be read.
+    Asks macOS (NSScreen.visibleFrame) which part of the CHOSEN screen (laptop
+    or TV) is not covered by its menu bar or the Dock.  Returns (x, y, w, h)
+    in SDL's global coordinates (origin = top-left of the main screen, y down),
+    so the window lands on the right screen.  None if it can't be read.
     Plain ctypes, so nothing extra to pip install.
     """
     import ctypes
@@ -1647,26 +1931,103 @@ def _mac_visible_frame():
     objc.sel_registerName.restype = ctypes.c_void_p
     objc.sel_registerName.argtypes = [ctypes.c_char_p]
 
-    def send(func_name, restype):
+    def send(func_name, restype, *extra):
         addr = ctypes.cast(getattr(objc, func_name), ctypes.c_void_p).value
-        return ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p)(addr)
+        return ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p, *extra)(addr)
 
     send_ptr = send("objc_msgSend", ctypes.c_void_p)
+    send_count = send("objc_msgSend", ctypes.c_ulong)
+    send_index = send("objc_msgSend", ctypes.c_void_p, ctypes.c_ulong)
     # Intel Macs return big structs through objc_msgSend_stret; Apple Silicon doesn't.
     send_rect = send("objc_msgSend" if platform.machine() == "arm64" else "objc_msgSend_stret",
                      NSRect)
     sel = objc.sel_registerName
 
     screens = send_ptr(objc.objc_getClass(b"NSScreen"), sel(b"screens"))
-    screen = send_ptr(screens, sel(b"firstObject")) if screens else None   # screen with the menu bar
-    if not screen:
+    if not screens:
         return None
-    frame = send_rect(screen, sel(b"frame"))
-    vis = send_rect(screen, sel(b"visibleFrame"))
-    if vis.w < 200 or vis.h < 200:
+    count = send_count(screens, sel(b"count"))
+    found = []                      # (frame_w, frame_h, visible rect in SDL coords)
+    main_h = None
+    for i in range(count):
+        screen = send_index(screens, sel(b"objectAtIndex:"), i)
+        frame = send_rect(screen, sel(b"frame"))
+        vis = send_rect(screen, sel(b"visibleFrame"))
+        if main_h is None:          # screen 0 = the one with the menu bar
+            main_h = frame.y + frame.h
+        if full:
+            # the whole screen (menu bar and Dock get hidden, see MAC_HIDE_MENU_BAR)
+            rect = (int(round(frame.x)), int(round(main_h - (frame.y + frame.h))),
+                    int(frame.w), int(frame.h))
+        else:
+            rect = (int(round(vis.x)), int(round(main_h - (vis.y + vis.h))),
+                    int(vis.w), int(vis.h))
+        found.append((frame.w, frame.h, rect))
+    if not found:
         return None
-    top = (frame.y + frame.h) - (vis.y + vis.h)
-    return (int(round(vis.x - frame.x)), int(round(top)), int(vis.w), int(vis.h))
+
+    # Match the screen SDL is using by its size (the index order can differ).
+    want_w, want_h = desktop_size()
+    index = chosen_display()
+    matches = [k for k, (w, h, _) in enumerate(found)
+               if abs(w - want_w) <= 2 and abs(h - want_h) <= 2]
+    if not matches:
+        return None
+    pick = index if index in matches else matches[0]
+    area = found[pick][2]
+    if area[2] < 200 or area[3] < 200:
+        return None
+    return area
+
+
+def hide_mac_menu_bar():
+    """True if the game should hide the Mac menu bar + Dock and cover the whole screen."""
+    if "--keep-menu-bar" in [a.lower() for a in sys.argv[1:]]:
+        return False
+    return bool(MAC_HIDE_MENU_BAR)
+
+
+def _mac_hide_menu_bar_and_dock():
+    """
+    Tells macOS to hide the menu bar and Dock while the game is the active app
+    (NSApplication presentation options, the normal way kiosk apps do it).
+    They come back as soon as the game quits or you switch apps.
+    """
+    import ctypes
+    import ctypes.util
+    objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+    ctypes.cdll.LoadLibrary(ctypes.util.find_library("AppKit"))
+    objc.objc_getClass.restype = ctypes.c_void_p
+    objc.objc_getClass.argtypes = [ctypes.c_char_p]
+    objc.sel_registerName.restype = ctypes.c_void_p
+    objc.sel_registerName.argtypes = [ctypes.c_char_p]
+    addr = ctypes.cast(objc.objc_msgSend, ctypes.c_void_p).value
+    send_ptr = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(addr)
+    send_uint = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong)(addr)
+
+    app = send_ptr(objc.objc_getClass(b"NSApplication"), objc.sel_registerName(b"sharedApplication"))
+    if not app:
+        return False
+    HIDE_DOCK, HIDE_MENU_BAR = 1 << 1, 1 << 3     # hiding the menu bar needs the Dock hidden too
+    send_uint(app, objc.sel_registerName(b"setPresentationOptions:"), HIDE_DOCK | HIDE_MENU_BAR)
+    return True
+
+
+def picture_scale_from_command_line():
+    """--picture 0.95 (or --picture=0.95) overrides PICTURE_SCALE."""
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        value = None
+        if arg.lower() == "--picture" and i + 1 < len(argv):
+            value = argv[i + 1]
+        elif arg.lower().startswith("--picture="):
+            value = arg.split("=", 1)[1]
+        if value is not None:
+            try:
+                return clamp(float(value), 0.8, 1.0)
+            except ValueError:
+                pass
+    return PICTURE_SCALE
 
 
 def usable_area():
@@ -1682,15 +2043,22 @@ def usable_area():
     area = (0, 0, width, height)
     if sys.platform == "darwin":
         try:
-            area = _mac_visible_frame() or None
+            area = _mac_visible_frame(full=hide_mac_menu_bar()) or None
         except Exception as error:      # any ctypes/AppKit problem -> safe guess
             print(f"[display] couldn't read the menu bar/Dock size ({error})")
             area = None
-        if area is None:
+        if area is None and chosen_display() == 0 and hide_mac_menu_bar():
+            area = (0, 0, width, height)
+        elif area is None and chosen_display() == 0:
             area = (0, MAC_FALLBACK_TOP, width,
                     height - MAC_FALLBACK_TOP - MAC_FALLBACK_BOTTOM)
-        print(f"[display] Mac: game area {area[2]}x{area[3]} at ({area[0]}, {area[1]}) "
-              f"- clear of the menu bar and Dock")
+        elif area is None:
+            # TV but its position couldn't be read: let SDL centre the window
+            # on that screen instead (x/y None, see Display.apply).
+            area = (None, None, width, height)
+        where = ("whole screen, menu bar + Dock hidden" if hide_mac_menu_bar()
+                 else "clear of the menu bar and Dock")
+        print(f"[display] Mac: game area {area[2]}x{area[3]} at ({area[0]}, {area[1]}) - {where}")
     _USABLE_AREA = area
     return area
 
@@ -1740,6 +2108,8 @@ class Display:
         self.scale = 1.0
         self.offset = (0, 0)
         self.windowed_size = None
+        self.menu_bar_hidden = False
+        self.picture_scale = picture_scale_from_command_line()
         self.apply()
 
     def _fit_windowed_size(self):
@@ -1759,18 +2129,37 @@ class Display:
             # but the menu bar and Dock draw on top of it, so it fills only the
             # area between them (otherwise the HUD and bottom holes are hidden).
             x, y, w, h = usable_area()
-            os.environ["SDL_VIDEO_WINDOW_POS"] = f"{x},{y}"
-            self.window = pygame.display.set_mode((w, h), pygame.NOFRAME)
-            try:   # also move it if the window already existed (F11 toggle)
-                from pygame._sdl2.video import Window
-                Window.from_display_module().position = (x, y)
-            except Exception:
-                pass
+            if x is None:
+                os.environ.pop("SDL_VIDEO_WINDOW_POS", None)
+                os.environ["SDL_VIDEO_CENTERED"] = "1"
+                self.window = _set_mode((w, h), pygame.NOFRAME)
+            else:
+                # SDL only uses the position when it CREATES a window, so after an
+                # F11 toggle start a fresh window. (Moving it with a temporary
+                # pygame._sdl2 Window object destroys the window when that object
+                # is cleaned up, which crashed the game.)
+                if pygame.display.get_surface() is not None:
+                    pygame.display.quit()
+                    pygame.display.init()
+                os.environ.pop("SDL_VIDEO_CENTERED", None)
+                os.environ["SDL_VIDEO_WINDOW_POS"] = f"{x},{y}"
+                self.window = pygame.display.set_mode((w, h), pygame.NOFRAME)
+            if hide_mac_menu_bar():
+                try:
+                    ok = _mac_hide_menu_bar_and_dock()
+                    print("[display] Mac menu bar + Dock hidden" if ok
+                          else "[display] couldn't hide the menu bar")
+                    self.menu_bar_hidden = ok
+                except Exception as error:
+                    print(f"[display] couldn't hide the menu bar ({error}) - "
+                          "turn on 'Automatically hide the menu bar' in System Settings")
         elif self.fullscreen:
-            self.window = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+            self.window = _set_mode((0, 0), pygame.FULLSCREEN)
         else:
+            os.environ.pop("SDL_VIDEO_WINDOW_POS", None)
+            os.environ["SDL_VIDEO_CENTERED"] = "1"
             self.windowed_size = self._fit_windowed_size()
-            self.window = pygame.display.set_mode(self.windowed_size, pygame.RESIZABLE)
+            self.window = _set_mode(self.windowed_size, pygame.RESIZABLE)
         self.canvas = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
         self._update_fit()
 
@@ -1780,10 +2169,34 @@ class Display:
 
     def _update_fit(self):
         win_w, win_h = self.window.get_size()
-        self.scale = min(win_w / SCREEN_WIDTH, win_h / SCREEN_HEIGHT)
+        # picture_scale < 1 shrinks the picture for TVs that cut off the edges
+        self.scale = min(win_w / SCREEN_WIDTH, win_h / SCREEN_HEIGHT) * self.picture_scale
         out_w, out_h = int(SCREEN_WIDTH * self.scale), int(SCREEN_HEIGHT * self.scale)
         self.offset = ((win_w - out_w) // 2, (win_h - out_h) // 2)
         self.out_size = (out_w, out_h)
+
+    def change_picture_scale(self, step):
+        """- / = keys: shrink or grow the picture (TV overscan fix)."""
+        self.picture_scale = round(clamp(self.picture_scale + step, 0.8, 1.0), 2)
+        self._update_fit()
+        print(f"[display] picture size {self.picture_scale:.2f} - put PICTURE_SCALE = "
+              f"{self.picture_scale:.2f} at the top of the file to keep it")
+
+    def info_lines(self):
+        """What the D key shows: handy for sorting out a TV on demo day."""
+        sizes = _screen_sizes()
+        lines = [
+            f"Screens found: {len(sizes)}  {sizes}",
+            f"Game is on screen {chosen_display()}  (--display N to pick another)",
+            f"Window: {self.window.get_size()}   Canvas: {SCREEN_WIDTH}x{SCREEN_HEIGHT}",
+            f"Picture size: {self.picture_scale:.2f}  (- and = to change)",
+        ]
+        if sys.platform == "darwin":
+            lines.append(f"Mac menu bar hidden: {'yes' if self.menu_bar_hidden else 'no'}")
+        if len(sizes) == 1:
+            lines.append("Only 1 screen: if a TV is plugged in, the Mac is MIRRORING.")
+            lines.append("Set the TV to 'Extend' in System Settings > Displays.")
+        return lines
 
     def toggle_fullscreen(self):
         self.fullscreen = not self.fullscreen
@@ -1850,6 +2263,11 @@ def run_game(orientation=None, fullscreen=None):
         fullscreen = cli_fullscreen
 
     pygame.init()
+    print(f"[game] screens found: {_screen_sizes()} -> using screen {chosen_display()} "
+          f"(--display N to choose)")
+    if len(_screen_sizes()) == 1:
+        print("[game] only ONE screen found. If a TV is plugged in, the computer is "
+              "probably MIRRORING - set the TV to 'Extend' so the game can fill it.")
     print(f"[game] starting - screen {desktop_size()}, "
           f"{'full screen' if fullscreen else 'window'}, ESC quits")
     fit_canvas_to_monitor(*usable_area()[2:])
@@ -1926,6 +2344,8 @@ def run_game(orientation=None, fullscreen=None):
         else:
             prepare_level_transition()
 
+    show_info_until = 0     # D key / - = keys show the screen info box until this time
+
     running = True
     while running:
         now = pygame.time.get_ticks()
@@ -1946,6 +2366,17 @@ def run_game(orientation=None, fullscreen=None):
                 elif event.key == pygame.K_F11:
                     display.toggle_fullscreen()
                     render_target = display.canvas
+
+                elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                    display.change_picture_scale(-0.01)
+                    show_info_until = now + 2500
+
+                elif event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
+                    display.change_picture_scale(+0.01)
+                    show_info_until = now + 2500
+
+                elif event.key == pygame.K_d:
+                    show_info_until = 0 if now < show_info_until else now + 10 ** 9
 
                 elif event.key == pygame.K_o and state["stage"] in (STAGE_TITLE, STAGE_CALIBRATION):
                     # Switch horizontal <-> vertical screen.  Only allowed
@@ -1969,7 +2400,8 @@ def run_game(orientation=None, fullscreen=None):
                     elif event.key == pygame.K_SPACE and sensors_ready(state["sensor_status"]):
                         prepare_level_transition()
 
-                elif event.key == pygame.K_SPACE and state["stage"] == STAGE_LEVEL_TRANSITION:
+                elif (event.key in (pygame.K_SPACE, pygame.K_RETURN, pygame.K_KP_ENTER)
+                        and state["stage"] == STAGE_LEVEL_TRANSITION):
                     begin_level_play()
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
@@ -2060,6 +2492,8 @@ def run_game(orientation=None, fullscreen=None):
         def finish_frame(shake=(0, 0)):
             if too_close:
                 draw_safety_warning(render_target, font, now)
+            if now < show_info_until:
+                draw_display_info(render_target, display.info_lines())
             display.present(shake)
 
         if state["stage"] == STAGE_TITLE:
@@ -2075,7 +2509,8 @@ def run_game(orientation=None, fullscreen=None):
         elif state["stage"] == STAGE_LEVEL_TRANSITION:
             level = LEVELS[state["level"]]
             draw_level_transition(
-                render_target, now, font_big, font_small, state["level"] + 1, level
+                render_target, now, font_big, font_small, state["level"] + 1, level,
+                time_left_ms=LEVEL_TRANSITION_MS - (now - state["level_transition_start"])
             )
             finish_frame()
 
