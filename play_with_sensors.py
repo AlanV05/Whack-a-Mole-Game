@@ -30,10 +30,16 @@ V2 COMPATIBILITY (Sprint 3 update)
 If no sensor data is coming in, everything falls back to the normal mouse, so
 the game still works for testing without the rig.
 
+SCREEN PICKER (Sprint 3 update 2)
+  The latest game (screen_whack_a_moleV2.py) can open on a TV / projector and
+  reads --display N from the command line. The launcher now passes that
+  straight through to the game, and only treats a *.py argument as the game file.
+
 HOW TO RUN (two terminals, both with the venv active)
   1) python sensor_to_processing_zoned.py
-  2) python play_with_sensors.py                   -> runs whack_a_moleV2.py
-     python play_with_sensors.py whack_a_mole.py   -> runs another version
+  2) python play_with_sensors.py                      -> runs the latest game
+     python play_with_sensors.py --display 1          -> latest game on screen 1 (TV)
+     python play_with_sensors.py whack_a_moleV2.py    -> runs another version
   Don't run the Processing sketch at the same time: both listen on port 9001.
 
 Requires:  pip install pygame python-osc
@@ -50,7 +56,8 @@ from pythonosc.dispatcher import Dispatcher
 from pythonosc.osc_server import ThreadingOSCUDPServer
 
 # ------------------------------------------------------------------ SETTINGS
-DEFAULT_GAME = "whack_a_moleV2.py"
+# First file found is used when no game is named on the command line.
+DEFAULT_GAMES = ["screen_whack_a_moleV2.py", "whack_a_moleV2.py"]
 OSC_LISTEN_IP = "127.0.0.1"
 OSC_LISTEN_PORT = 9001          # must match OSC_OUT_PORT in the tracker
 SENSOR_TIMEOUT_S = 1.0          # no tracker data for this long -> fall back to mouse
@@ -197,6 +204,19 @@ class GridMapper:
 
 
 # ------------------------------------------------------------------ LOADING + PATCHING
+def find_game_file():
+    """The *.py named on the command line, else the newest default that exists.
+    Other arguments (e.g. --display 1) are left in sys.argv for the game."""
+    for arg in sys.argv[1:]:
+        if arg.lower().endswith(".py"):
+            return arg
+    here = Path(__file__).resolve().parent
+    for name in DEFAULT_GAMES:
+        if Path(name).exists() or (here / name).exists():
+            return name
+    return DEFAULT_GAMES[0]
+
+
 def load_game(name):
     path = Path(name)
     if not path.is_absolute() and not path.exists():
@@ -353,7 +373,7 @@ def hook_up(game, feed):
 
 
 def main():
-    game_file = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_GAME
+    game_file = find_game_file()
     game = load_game(game_file)
     feed = SensorFeed()
     start_osc_listener(feed)
