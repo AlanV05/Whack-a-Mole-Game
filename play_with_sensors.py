@@ -30,6 +30,17 @@ V2 COMPATIBILITY (Sprint 3 update)
 If no sensor data is coming in, everything falls back to the normal mouse, so
 the game still works for testing without the rig.
 
+FREE MOVEMENT (branch alan-free-move)
+  The hammer no longer locks onto the holes: it follows the player's exact
+  position across the whole field. Because a body is much bigger than the
+  mole's 45 px hit circle, two things keep it playable:
+    * LATERAL_GAIN stretches left/right so the outer holes can be reached
+      (the sensors read a player at the edge slightly toward the centre).
+    * HIT_REACH: auto-whack / ENTER counts a hit when the player is within
+      this fraction of a hole-spacing of the mole, and whacks the mole itself.
+  FREE_SMOOTHING evens out sensor jitter on screen. SNAP_TO_HOLES = True brings
+  back the old locked behaviour.
+
 HOW TO RUN (two terminals, both with the venv active)
   1) python sensor_to_processing_zoned.py
   2) python play_with_sensors.py                   -> runs whack_a_moleV2.py
@@ -65,8 +76,13 @@ FLIP_Y = False                  # True: walking toward the sensors moves the cur
 
 # Lock the cursor onto the nearest hole, with a dead-band so it doesn't flicker
 # on the line between two holes. False = free, continuous movement.
-SNAP_TO_HOLES = True
-SNAP_HYSTERESIS = 0.15          # fraction of a hole-spacing you must pass before switching
+SNAP_TO_HOLES = False            # free movement: the hammer follows you exactly
+SNAP_HYSTERESIS = 0.15          # (snap mode only) fraction of a hole-spacing to pass before switching
+
+# --- free-movement tuning (used when SNAP_TO_HOLES = False)
+LATERAL_GAIN = 1.35             # stretch left/right about the centre so the edge holes are reachable
+FREE_SMOOTHING = 0.45           # 0..1 per frame: lower = steadier hammer but more lag, 1 = raw
+HIT_REACH = 0.35                # whack a mole within this many hole-spacings (0.35 ~ 17 cm on the floor)
 
 WHACK_KEY = pygame.K_RETURN     # keyboard whack at the player's position
 
@@ -152,6 +168,7 @@ class GridMapper:
         self.game = game
         self.snap_col = None
         self.snap_row = None
+        self.smooth = None
 
     @staticmethod
     def _continuous_index(frac, n):
@@ -179,6 +196,9 @@ class GridMapper:
         ys = sorted({p[1] for p in holes})
         width, height = self.game.SCREEN_WIDTH, self.game.SCREEN_HEIGHT
 
+        if not SNAP_TO_HOLES:
+            lateral_frac = 0.5 + (lateral_frac - 0.5) * LATERAL_GAIN
+            lateral_frac = max(0.0, min(1.0, lateral_frac))
         x_frac = 1.0 - lateral_frac if MIRROR_X else lateral_frac
         y_frac = max(0.0, min(1.0, depth_cm / PLAY_DEPTH_CM))
         if FLIP_Y:
@@ -194,8 +214,24 @@ class GridMapper:
 
         x = self._index_to_px(col, xs)
         y = self._index_to_px(row, ys)
+        if not SNAP_TO_HOLES:
+            if self.smooth is None:
+                self.smooth = [x, y]
+            else:
+                self.smooth[0] += (x - self.smooth[0]) * FREE_SMOOTHING
+                self.smooth[1] += (y - self.smooth[1]) * FREE_SMOOTHING
+            x, y = self.smooth
         return (int(max(0, min(width - 1, x))),
                 int(max(0, min(height - 1, y))))
+
+    def hole_spacing(self):
+        """(column gap, row gap) between neighbouring holes, in game pixels."""
+        holes = self.game.HOLE_POSITIONS
+        xs = sorted({p[0] for p in holes})
+        ys = sorted({p[1] for p in holes})
+        sx = (xs[-1] - xs[0]) / (len(xs) - 1) if len(xs) > 1 else 100
+        sy = (ys[-1] - ys[0]) / (len(ys) - 1) if len(ys) > 1 else 100
+        return sx, sy
 
 
 # ------------------------------------------------------------------ LOADING + PATCHING
@@ -253,6 +289,31 @@ def hook_up(game, feed):
 
     dwell = {"mole": None, "since": 0}
 
+    def within_reach(mole, pos):
+        """Snap mode: the hammer must be on the mole. Free mode: close enough counts."""
+        if SNAP_TO_HOLES:
+            return mole.contains(pos)
+        if not mole.contains(mole.position):          # mole not whackable (hit / escaping)
+            return False
+        # measured in hole-spacings on each axis, so the reach is the same
+        # distance on the floor left/right as front/back (~17 cm at 0.35)
+        sx, sy = mapper.hole_spacing()
+        dx = (pos[0] - mole.position[0]) / sx
+        dy = (pos[1] - mole.position[1]) / sy
+        return dx * dx + dy * dy <= HIT_REACH * HIT_REACH
+
+    def reachable_mole(pos):
+        """In free mode, the whackable mole the player is close enough to (or None)."""
+        if SNAP_TO_HOLES or pos is None:
+            return None
+        for mole, _ in list(live_moles.values()):
+            try:
+                if within_reach(mole, pos):
+                    return mole
+            except Exception:
+                pass
+        return None
+
     def auto_whack_target(pos, now):
         """The mole the player has been standing on long enough, or None."""
         for key in [k for k, (_, t) in live_moles.items() if now - t > 200]:
@@ -263,7 +324,7 @@ def hook_up(game, feed):
             if getattr(mole, "_sensor_whacked", False) or getattr(mole, "hit", False):
                 continue
             try:
-                on_it = mole.contains(pos)
+                on_it = within_reach(mole, pos)
             except Exception:
                 on_it = False
             if not on_it:
@@ -284,10 +345,13 @@ def hook_up(game, feed):
         pos = player_pos()                                   # game pixels (for mole.contains)
         win_pos = to_window(pos) if pos is not None else None  # what the game expects in events
         out = []
-        if AUTO_WHACK and pos is not None and auto_whack_target(pos, pygame.time.get_ticks()):
+        target = auto_whack_target(pos, pygame.time.get_ticks()) if (AUTO_WHACK and pos is not None) else None
+        if target is not None:
+            # free mode: whack the mole itself, so "close enough" still lands on it
+            at = to_window(target.position) if not SNAP_TO_HOLES else win_pos
             for _ in range(clicks_per_whack):
                 out.append(pygame.event.Event(pygame.MOUSEBUTTONDOWN,
-                                              {"pos": win_pos, "button": 1}))
+                                              {"pos": at, "button": 1}))
         for ev in events:
             if (win_pos is not None
                     and ev.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP)
@@ -298,7 +362,9 @@ def hook_up(game, feed):
                 continue
             out.append(ev)
             if ev.type == pygame.KEYDOWN and ev.key == WHACK_KEY:
-                whack_at = win_pos if win_pos is not None else real_get_pos()
+                near = reachable_mole(pos)
+                whack_at = (to_window(near.position) if near is not None
+                            else win_pos if win_pos is not None else real_get_pos())
                 for _ in range(clicks_per_whack):
                     out.append(pygame.event.Event(pygame.MOUSEBUTTONDOWN,
                                                   {"pos": whack_at, "button": 1}))
@@ -350,7 +416,8 @@ def hook_up(game, feed):
         game.draw_sensor_calibration = sensor_calibration
 
     auto = f"stand on a mole for {AUTO_WHACK_DWELL_MS}ms, or " if AUTO_WHACK else ""
-    print(f"Whack = {auto}left-click / ENTER ({clicks_per_whack} click(s) sent per whack). "
+    mode = "SNAP to holes" if SNAP_TO_HOLES else f"FREE movement (reach {HIT_REACH} hole-spacings)"
+    print(f"Hammer: {mode}. Whack = {auto}left-click / ENTER ({clicks_per_whack} click(s) sent per whack). "
           f"Sensor Check: {len(slots)} slots. No sensor data -> falls back to the mouse.")
 
 
