@@ -38,8 +38,18 @@ FREE MOVEMENT (branch alan-free-move)
       (the sensors read a player at the edge slightly toward the centre).
     * HIT_REACH: auto-whack / ENTER counts a hit when the player is within
       this fraction of a hole-spacing of the mole, and whacks the mole itself.
-  FREE_SMOOTHING evens out sensor jitter on screen. SNAP_TO_HOLES = True brings
-  back the old locked behaviour.
+  FREE_SMOOTHING evens out sensor jitter on screen, and DEADBAND_CM ignores
+  tiny movements so the hammer sits still when you do. SNAP_TO_HOLES = True
+  brings back the old locked behaviour.
+
+FINAL-DEMO ADDITIONS (sensor_ui.py + game_settings.py)
+  * whack_settings.json   all the tuning values above, editable without code
+  * Setup guide (H)       where each box goes, with real measurements
+  * Calibration check     Sensor Check screen: stand on the centre X, every box
+                          must see you before play starts (C skips, R redoes)
+  * Box status            connected / update rate / reply % / live distance
+  * 3-sensor fallback     F on the Sensor Check screen if one box is missing;
+                          a REDUCED COVERAGE banner shows during play
 
 HOW TO RUN (two terminals, both with the venv active)
   1) python sensor_to_processing_zoned.py
@@ -61,6 +71,10 @@ from pathlib import Path
 import pygame
 from pythonosc.dispatcher import Dispatcher
 from pythonosc.osc_server import ThreadingOSCUDPServer
+
+import game_settings
+import sensor_ui
+import sensor_to_processing_zoned as tracker_cfg   # only for the box layout (SENSORS etc.)
 
 # ------------------------------------------------------------------ SETTINGS
 DEFAULT_GAME = "whack_a_moleV2.py"
@@ -97,6 +111,27 @@ FALLBACK_SAFETY_CM = 50.0       # used only if the game doesn't define its own
 # order [LEFT, MID, MID2, RIGHT]. Picked automatically from how many slots the
 # game shows (its DEFAULT_SENSOR_STATUS).
 SENSOR_SLOTS_4 = {1: [0], 2: [1], 3: [2], 4: [3]}   # V2: one slot per board
+DEADBAND_CM = 3.0               # free mode: ignore movements smaller than this
+
+# Values in whack_settings.json override the defaults above (see game_settings.py).
+SETTINGS = game_settings.load()
+SNAP_TO_HOLES = bool(SETTINGS["snap_to_holes"])
+MIRROR_X = bool(SETTINGS["mirror_x"])
+FLIP_Y = bool(SETTINGS["flip_y"])
+LATERAL_GAIN = float(SETTINGS["lateral_gain"])
+FREE_SMOOTHING = float(SETTINGS["free_smoothing"])
+DEADBAND_CM = float(SETTINGS["deadband_cm"])
+HIT_REACH = float(SETTINGS["hit_reach"])
+AUTO_WHACK = bool(SETTINGS["auto_whack"])
+AUTO_WHACK_DWELL_MS = int(SETTINGS["auto_whack_dwell_ms"])
+
+# Floor layout, taken from the tracker so the two can never disagree.
+GEOMETRY = {
+    "width": tracker_cfg.PLAY_WIDTH_CM,
+    "deadzone": tracker_cfg.DEADZONE_CM,
+    "depth": tracker_cfg.PLAY_DEPTH_CM,
+    "sensors": list(tracker_cfg.SENSORS),
+}
 SENSOR_SLOTS_3 = {1: [0], 2: [1, 2], 3: [3]}        # older 3-slot game: slot 2 = both middles
 
 
@@ -112,6 +147,7 @@ class SensorFeed:
         self.boards = []                   # online flag per sensor
         self.last_avatar = 0.0
         self.last_boards = 0.0
+        self.stats = {}                    # hz / ok / rtt lists, once a second
 
     def on_avatar(self, _addr, *args):
         if len(args) < 3:
@@ -129,6 +165,17 @@ class SensorFeed:
             self.boards = [int(a) for a in args]
             self.last_boards = time.time()
 
+    def on_stats(self, _addr, *args):
+        n = len(args) // 3
+        if n == 0:
+            return
+        with self.lock:
+            self.stats = {"hz": list(args[:n]), "ok": list(args[n:2 * n]), "rtt": list(args[2 * n:])}
+
+    def get_stats(self):
+        with self.lock:
+            return dict(self.stats)
+
     def live(self):
         return time.time() - self.last_avatar < SENSOR_TIMEOUT_S
 
@@ -144,6 +191,7 @@ def start_osc_listener(feed):
     dispatcher = Dispatcher()
     dispatcher.map("/avatar", feed.on_avatar)
     dispatcher.map("/boards", feed.on_boards)
+    dispatcher.map("/stats", feed.on_stats)
     try:
         server = ThreadingOSCUDPServer((OSC_LISTEN_IP, OSC_LISTEN_PORT), dispatcher)
     except OSError as error:
@@ -169,6 +217,7 @@ class GridMapper:
         self.snap_col = None
         self.snap_row = None
         self.smooth = None
+        self.held = None
 
     @staticmethod
     def _continuous_index(frac, n):
@@ -215,6 +264,18 @@ class GridMapper:
         x = self._index_to_px(col, xs)
         y = self._index_to_px(row, ys)
         if not SNAP_TO_HOLES:
+            # dead band: only move the target once you've moved more than
+            # DEADBAND_CM on the floor, so the hammer stays put when you do
+            sx, sy = self.hole_spacing()
+            band_x = DEADBAND_CM * sx / (tracker_cfg.PLAY_WIDTH_CM / 3)
+            band_y = DEADBAND_CM * sy / (PLAY_DEPTH_CM / 3)
+            if self.held is None:
+                self.held = [x, y]
+            if abs(x - self.held[0]) > band_x:
+                self.held[0] = x
+            if abs(y - self.held[1]) > band_y:
+                self.held[1] = y
+            x, y = self.held
             if self.smooth is None:
                 self.smooth = [x, y]
             else:
@@ -238,7 +299,8 @@ class GridMapper:
 def load_game(name):
     path = Path(name)
     if not path.is_absolute() and not path.exists():
-        path = Path(__file__).resolve().parent / name
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))   # installed app or script
+        path = base / name
     if not path.exists():
         raise SystemExit(f"Can't find the game file: {name}\n"
                          "Put play_with_sensors.py in the same folder as the game.")
@@ -263,6 +325,48 @@ def hook_up(game, feed):
 
     # The older version whacks on a DOUBLE click, V2 on a single click.
     clicks_per_whack = 2 if hasattr(game, "DOUBLE_CLICK_TIME_MS") else 1
+
+    # --- which screen is the game on? (set by the draw functions it calls)
+    ui = {"screen": None, "setup": False}
+    calibration = sensor_ui.Calibration(GEOMETRY, SETTINGS)
+
+    def on_screen(name):
+        if name != ui["screen"]:
+            if name == "calibration" and ui["screen"] != "setup":
+                calibration.reset()          # fresh check every time you arrive
+            if name not in ("title", "calibration"):
+                ui["setup"] = False
+            ui["screen"] = name
+
+    def wrap_draw(fn_name, screen_name, after=None):
+        original = getattr(game, fn_name, None)
+        if original is None:
+            return
+
+        def wrapped(surface, *a, **kw):
+            on_screen(screen_name)
+            result = original(surface, *a, **kw)
+            if after is not None:
+                after(surface, *a, **kw)
+            return result
+
+        setattr(game, fn_name, wrapped)
+
+    def title_extras(surface, now, *_):
+        if ui["setup"]:
+            sensor_ui.draw_setup_page(game, surface, now, GEOMETRY, SETTINGS)
+        else:
+            sensor_ui.draw_title_hint(game, surface)
+
+    def hud_extras(surface, *_a, **_k):
+        if feed.boards_live():
+            _, _, _, boards = feed.snapshot()
+            sensor_ui.draw_coverage_banner(game, surface, GEOMETRY, boards, calibration.fallback)
+
+    wrap_draw("draw_title_screen", "title", title_extras)
+    wrap_draw("draw_level_transition", "intro")
+    wrap_draw("draw_game_over", "game_over")
+    wrap_draw("draw_hud", "playing", hud_extras)
 
     def player_pos():
         """Player position in GAME pixels (same space as HOLE_POSITIONS / moles)."""
@@ -342,6 +446,29 @@ def hook_up(game, feed):
     # --- clicks / ENTER whack at the player's position
     def sensor_event_get(*args, **kwargs):
         events = real_event_get(*args, **kwargs)
+        # launcher keys on the title / Sensor Check screens (swallowed, the game never sees them)
+        kept = []
+        for ev in events:
+            if ev.type == pygame.KEYDOWN and ui["screen"] in ("title", "calibration"):
+                if ev.key == pygame.K_h or (ui["setup"] and ev.key == pygame.K_SPACE):
+                    ui["setup"] = not ui["setup"]
+                    continue
+                if ui["setup"] and ev.type == pygame.KEYDOWN and ev.key != pygame.K_ESCAPE:
+                    continue                                  # setup page open: ignore other keys
+                if ui["screen"] == "calibration" and feed.boards_live():
+                    if ev.key == pygame.K_c:
+                        calibration.skipped = True
+                        continue
+                    if ev.key == pygame.K_f:
+                        calibration.fallback = True
+                        continue
+                    if ev.key == pygame.K_r:
+                        calibration.reset()
+                        continue
+            if ui["setup"] and ev.type == pygame.MOUSEBUTTONDOWN:
+                continue                                      # don't start the game behind the guide
+            kept.append(ev)
+        events = kept
         pos = player_pos()                                   # game pixels (for mole.contains)
         win_pos = to_window(pos) if pos is not None else None  # what the game expects in events
         out = []
@@ -401,7 +528,10 @@ def hook_up(game, feed):
 
         def sensor_ready(status):
             if feed.boards_live():
-                return all(live_status().values())
+                # live sensors: boxes connected AND the calibration check passed
+                # (or skipped with C, or 3-sensor mode with F)
+                _, _, _, boards = feed.snapshot()
+                return calibration.ready(boards)
             return original_ready(status)
 
         game.sensors_ready = sensor_ready
@@ -410,8 +540,14 @@ def hook_up(game, feed):
         original_calibration = game.draw_sensor_calibration
 
         def sensor_calibration(surface, now, font_big, font_small, sensor_status):
-            status = live_status() if feed.boards_live() else sensor_status
-            return original_calibration(surface, now, font_big, font_small, status)
+            on_screen("calibration")
+            if feed.boards_live():
+                sensor_ui.draw_calibration(game, surface, now, GEOMETRY, calibration,
+                                           feed.snapshot(), feed.get_stats())
+            else:
+                original_calibration(surface, now, font_big, font_small, sensor_status)
+            if ui["setup"]:
+                sensor_ui.draw_setup_page(game, surface, now, GEOMETRY, SETTINGS)
 
         game.draw_sensor_calibration = sensor_calibration
 
@@ -419,6 +555,8 @@ def hook_up(game, feed):
     mode = "SNAP to holes" if SNAP_TO_HOLES else f"FREE movement (reach {HIT_REACH} hole-spacings)"
     print(f"Hammer: {mode}. Whack = {auto}left-click / ENTER ({clicks_per_whack} click(s) sent per whack). "
           f"Sensor Check: {len(slots)} slots. No sensor data -> falls back to the mouse.")
+    print("Title / Sensor Check keys: H = setup guide.  Sensor Check: C = skip standing check, "
+          "F = 3-sensor mode, R = redo check.")
 
 
 def main():

@@ -1,31 +1,33 @@
 /*
   RCWL-1601 ultrasonic sensor on ESP32 -> sends distance over WiFi (UDP)
-  TIME-DIVISION version: the board only fires when the PC tells it to.
+  TIME-DIVISION + AUTO-DISCOVERY version (no PC IP address needed)
   =====================================================================
-  Upload this SAME sketch to all 3 boards. On each board, change SENSOR_ID
-  to "LEFT", "MID", "MID2", or "RIGHT".
+  Upload this SAME sketch to all 4 boards. On each board, change SENSOR_ID
+  to "LEFT", "MID", "MID2" or "RIGHT". That is the only line that differs.
 
-  HOW IT WORKS
-    The PC (sensor_to_processing_zoned.py) sends "FIRE" to one board at a
-    time, in turn. A board fires its sensor ONLY when it gets "FIRE", then
-    replies "LEFT 123.45". So no two sensors ever ping at the same moment and
-    they can't hear each other's echoes (no crosstalk).
+  WORKS ON ANY LAPTOP (no PC_IP to set)
+    Until the game is running, the board shouts "HELLO MID2" to the whole
+    network (UDP broadcast) twice a second. The game hears it and starts
+    sending "FIRE". The first FIRE tells the board where the PC is, and every
+    reading goes straight back to that PC. Plug in a different laptop, or the
+    hotspot gives the Mac a new address -> nothing to change or reflash.
+    If the game stops polling for 1 s the board goes back to broadcasting.
 
-    While the PC isn't polling it (e.g. Python not running yet), the board
-    sends "HELLO LEFT" twice a second so the PC can learn its IP address.
+  TIME-DIVISION FIRING
+    A board fires its sensor ONLY when it gets "FIRE", then replies
+    "MID2 123.45". The PC fires one board at a time, so no two sensors ever
+    ping together and they can't hear each other's echoes (no crosstalk).
 
-  Pairs with: sensor_to_processing_zoned.py
+  Pairs with: sensor_to_processing_zoned.py (unchanged)
     board -> PC  on UDP 9000 (readings + HELLO)
     PC -> board  on UDP 9002 (FIRE)
 
-  WIRING (same on every board):
-    TRIG -> GPIO25  (direct, 3.3V is enough to trigger)
-    ECHO -> GPIO26  THROUGH A VOLTAGE DIVIDER (ECHO is 5V, ESP32 pins are 3.3V!)
-            ECHO --[1k]--+--[2k]-- GND
-                         |
-                       GPIO26
-    VCC  -> 5V
+  WIRING (same on every board, no solder - Dupont jumpers):
+    TRIG -> GPIO25
+    ECHO -> GPIO26
+    VCC  -> 3V3   (sensor on 3.3 V, so ECHO is already 3.3 V logic - no divider)
     GND  -> GND
+    Battery: 4 x AA NiMH -> VIN (5V pin) and GND
 */
 
 #include <WiFi.h>
@@ -33,25 +35,29 @@
 
 // ---------------- SET THESE ----------------
 const char* WIFI_SSID = "AlanV";
-const char* WIFI_PASS = "****";
-const char* PC_IP     = "172.20.10.14";   // your PC's IPv4 address
-const int   PC_PORT   = 9000;             // must match UDP_LISTEN_PORT in the Python
-const int   POLL_PORT = 9002;             // must match POLL_PORT in the Python
-const char* SENSOR_ID = "MID2";           // "LEFT" / "MID" / "MID2"/ "RIGHT"  -- change per board
+const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";   // never commit the real password
+const char* SENSOR_ID = "MID2";                 // "LEFT" / "MID" / "MID2" / "RIGHT" -- change per board
+const int   PC_PORT   = 9000;                   // must match UDP_LISTEN_PORT in the Python
+const int   POLL_PORT = 9002;                   // must match POLL_PORT in the Python
 // --------------------------------------------
 
 #define TRIG_PIN 25
 #define ECHO_PIN 26
-#define ECHO_TIMEOUT_US 15000   // ~2.5m max range; keeps each turn short
+#define ECHO_TIMEOUT_US 15000   // ~2.5 m max range; keeps each turn short
+#define POLL_LOST_MS    1000    // no FIRE for this long -> go back to broadcasting HELLO
+#define HELLO_EVERY_MS  500
 
 WiFiUDP udp;
+IPAddress pcIP;                 // learned from the first FIRE
+bool havePC = false;
 unsigned long lastFireMs  = 0;
 unsigned long lastHelloMs = 0;
 
 void connectWiFi() {
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);   // WiFi power-save adds big random delays to FIRE -> keep it off
+  WiFi.setSleep(false);         // WiFi power-save adds big random delays to FIRE -> keep it off
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  // WiFi.setTxPower(WIFI_POWER_11dBm);   // uncomment if a board browns out on batteries
   Serial.print("Connecting to WiFi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(300);
@@ -61,11 +67,13 @@ void connectWiFi() {
   Serial.println(WiFi.localIP());
   Serial.print("Sensor: ");
   Serial.println(SENSOR_ID);
+  Serial.print("Announcing to: ");
+  Serial.println(WiFi.broadcastIP());
   udp.begin(POLL_PORT);
 }
 
-void sendToPC(const char* msg) {
-  udp.beginPacket(PC_IP, PC_PORT);
+void sendTo(IPAddress ip, const char* msg) {
+  udp.beginPacket(ip, PC_PORT);
   udp.write((const uint8_t*)msg, strlen(msg));
   udp.endPacket();
 }
@@ -90,11 +98,13 @@ void setup() {
 
 void loop() {
   if (WiFi.status() != WL_CONNECTED) {
+    havePC = false;
     connectWiFi();
   }
 
   int size = udp.parsePacket();
   if (size > 0) {
+    IPAddress sender = udp.remoteIP();      // whoever sent FIRE is the PC
     char buf[16];
     int n = udp.read(buf, sizeof(buf) - 1);
     buf[n > 0 ? n : 0] = '\0';
@@ -104,21 +114,27 @@ void loop() {
     while (udp.parsePacket() > 0) { udp.flush(); }
 
     if (strncmp(buf, "FIRE", 4) == 0) {
+      if (!havePC || !(sender == pcIP)) {
+        pcIP = sender;
+        havePC = true;
+        Serial.print("PC found at ");
+        Serial.println(pcIP);
+      }
       float d = readDistanceCm();
       char msg[32];
       snprintf(msg, sizeof(msg), "%s %.2f", SENSOR_ID, d);
-      sendToPC(msg);
+      sendTo(pcIP, msg);
       lastFireMs = millis();
       Serial.println(msg);   // USB debugging
     }
   }
 
-  // Not being polled? Announce ourselves so the PC learns our IP.
+  // Not being polled? Shout HELLO to the whole network so any PC can find us.
   unsigned long now = millis();
-  if (now - lastFireMs > 1000 && now - lastHelloMs > 500) {
+  if (now - lastFireMs > POLL_LOST_MS && now - lastHelloMs > HELLO_EVERY_MS) {
     char hello[24];
     snprintf(hello, sizeof(hello), "HELLO %s", SENSOR_ID);
-    sendToPC(hello);
+    sendTo(WiFi.broadcastIP(), hello);
     lastHelloMs = now;
   }
 }

@@ -5,3 +5,9 @@ results.zip
 sketch.properties
 venv/
 __pycache__/
+tracker_log.txt
+whack_log.txt
+whack_settings.json
+build/
+dist/
+installer_output/

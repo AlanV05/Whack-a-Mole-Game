@@ -141,3 +141,32 @@ Rikita Shil
 
 Software Engineering  
 Macquarie University
+
+---
+
+## Final product (Sprint 3): playing with the ultrasonic sensors
+
+**Windows (no Python needed):** run `WhackAMole_Setup.exe` (built automatically by GitHub Actions:
+Actions tab -> "Build Windows installer" -> Artifacts). The first time it runs, allow it on
+**Private and Public** networks when Windows asks.
+
+**From the code (Mac / Windows):**
+```bash
+pip install pygame-ce python-osc
+python whack_a_mole_app.py              # tracker + game in one program
+python whack_a_mole_app.py --display 1  # game on the TV (screen 1)
+```
+
+| File | What it does |
+|---|---|
+| `sensor_esp32_wifi_zoned/` | ESP32 firmware. Boards find the PC by UDP broadcast, so no IP address to set. |
+| `sensor_to_processing_zoned.py` | Tracker: fires the 4 boards in turn, filters, works out the player's position. |
+| `play_with_sensors.py` | Runs the team's game with the sensors instead of the mouse. |
+| `sensor_ui.py` | Setup guide (H), calibration check, sensor status, reduced-coverage banner. |
+| `game_settings.py` / `whack_settings.json` | Tuning values you can change without editing code. |
+| `whack_a_mole_app.py` | One program: tracker + game. Entry point for the Windows build. |
+| `WhackAMole.spec`, `installer.iss`, `build_windows.bat`, `.github/workflows/build-windows.yml` | Windows packaging. |
+
+**Before play:** press **H** on the title screen for where the boxes go. On the Sensor Check screen,
+stand on the centre X until every box shows a tick, then press SPACE
+(C = skip the standing check, F = play on 3 sensors if one box is missing, R = redo).
