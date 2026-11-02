@@ -113,6 +113,10 @@ FALLBACK_SAFETY_CM = 50.0       # used only if the game doesn't define its own
 SENSOR_SLOTS_4 = {1: [0], 2: [1], 3: [2], 4: [3]}   # V2: one slot per board
 DEADBAND_CM = 3.0               # free mode: ignore movements smaller than this
 
+# Dead-zone alarm only once the game has started (not while people walk around
+# during setup / calibration). "playing" = a level is running.
+ALARM_SCREENS = ("playing",)
+
 # Values in whack_settings.json override the defaults above (see game_settings.py).
 SETTINGS = game_settings.load()
 SNAP_TO_HOLES = bool(SETTINGS["snap_to_holes"])
@@ -507,7 +511,9 @@ def hook_up(game, feed):
 
         def sensor_too_close(cursor_pos):
             if not feed.live():
-                return original_too_close(cursor_pos)
+                return original_too_close(cursor_pos)     # mouse mode: hold W to test
+            if ui["screen"] not in ALARM_SCREENS:
+                return False          # title / Sensor Check / game over: people are setting up
             _, _, raw, _ = feed.snapshot()
             readings = [d for d in raw if d > 0]
             return bool(readings) and min(readings) < limit_cm

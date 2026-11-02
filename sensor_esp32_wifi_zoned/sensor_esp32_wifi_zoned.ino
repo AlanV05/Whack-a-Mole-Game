@@ -35,8 +35,8 @@
 
 // ---------------- SET THESE ----------------
 const char* WIFI_SSID = "AlanV";
-const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";   // never commit the real password
-const char* SENSOR_ID = "MID2";                 // "LEFT" / "MID" / "MID2" / "RIGHT" -- change per board
+const char* WIFI_PASS = "jesalaalv76";   // never commit the real password
+const char* SENSOR_ID = "RIGHT";                 // "LEFT" / "MID" / "MID2" / "RIGHT" -- change per board
 const int   PC_PORT   = 9000;                   // must match UDP_LISTEN_PORT in the Python
 const int   POLL_PORT = 9002;                   // must match POLL_PORT in the Python
 // --------------------------------------------

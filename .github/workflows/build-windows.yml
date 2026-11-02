@@ -1,0 +1,40 @@
+name: Build Windows installer
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install pygame-ce python-osc pyinstaller
+      - name: Smoke test (imports + game file loads)
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: python -c "import play_with_sensors as L; g = L.load_game('whack_a_moleV2.py'); print('game OK:', hasattr(g, 'run_game'))"
+      - name: Build WhackAMole.exe (PyInstaller)
+        run: pyinstaller --noconfirm WhackAMole.spec
+      - name: Add default settings file
+        run: python -c "import json, game_settings; open('dist/WhackAMole/whack_settings.json', 'w').write(json.dumps(game_settings.DEFAULTS, indent=2))"
+      - name: Build installer (Inno Setup)
+        run: |
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WhackAMole-Windows
+          path: installer_output/WhackAMole_Setup.exe
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WhackAMole-portable-folder
+          path: dist/WhackAMole/
